@@ -41,7 +41,11 @@ Jitter, packet loss, DNS, bufferbloat, health assessment, recommendations and hi
 
 ## Platform status
 
-Linux, Windows, and macOS are target platforms. The GitHub Actions workflow is manually triggered to minimize runner usage and runs the full offscreen suite on all three with Python 3.11 and 3.14; its hosted results are pending publication and execution. The Linux application has been checked in native XFCE. Windows and macOS native desktop behavior and standalone distributions remain unverified, and cross-platform packaging is deferred. Passing offscreen tests does not establish native desktop behavior.
+Linux, Windows, and macOS are target platforms. CI is manual only: choose `linux`, `windows`, `macos`, or `all` when dispatching the workflow. Each selected platform runs Python 3.11 and 3.14, using two jobs for one platform or six for all three. Prefer local verification, avoid repeating successful platform jobs without cause, and reserve the full matrix for meaningful compatibility checks, phase completion, and releases.
+
+The initial hosted run passed both Windows and macOS jobs. Both Ubuntu jobs failed during Qt import because `libEGL.so.1` was missing; the Linux runtime dependency correction awaits hosted verification. After publishing that correction, dispatch a new Linux-only run against the corrected commit rather than rerunning the old failed run.
+
+The Linux application has been checked in native XFCE. Windows and macOS native desktop behavior and standalone distributions remain unverified, and cross-platform packaging is deferred. Passing offscreen tests does not establish native desktop behavior.
 
 ## License
 

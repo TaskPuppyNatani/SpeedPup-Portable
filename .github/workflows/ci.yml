@@ -2,6 +2,17 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to test
+        required: true
+        type: choice
+        default: linux
+        options:
+          - all
+          - linux
+          - windows
+          - macos
 
 permissions:
   contents: read
@@ -14,7 +25,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: >-
+          ${{ fromJSON('{"all":["ubuntu-latest","windows-latest","macos-latest"],"linux":["ubuntu-latest"],"windows":["windows-latest"],"macos":["macos-latest"]}')[inputs.platform] }}
         python: ['3.11', '3.14']
     env:
       QT_QPA_PLATFORM: offscreen
@@ -23,6 +35,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libdbus-1-3
       - name: Install application and development dependencies
         run: python -m pip install -e '.[dev]'
       - name: Check dependencies
