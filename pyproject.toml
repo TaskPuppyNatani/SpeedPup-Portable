@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speedpup-portable"
+version = "0.1.0"
+description = "Cross-platform network testing and diagnostics"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "TaskPuppyKreations" }]
+dependencies = ["PySide6-Essentials>=6.6,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+speedpup-portable = "speedpup.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/speedpup-portable" = ["assets/TPK-Logo.png"]
+"share/speedpup-portable/UI" = ["assets/UI/Mockup UI.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
