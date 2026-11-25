@@ -156,6 +156,70 @@ def test_public_connection_rejects_private_dns_results(monkeypatch) -> None:
         _public_connection(("example.test", 80), 1)
 
 
+@pytest.mark.parametrize("address", ["::1", "fc00::1", "fe80::1", "::ffff:127.0.0.1"])
+def test_public_connection_rejects_nonpublic_ipv6_without_connecting(monkeypatch, address: str) -> None:
+    from speedpup.core.speedtest import _public_connection
+
+    sockaddr = (address, 443, 0, 0)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)
+    ])
+
+    def unexpected_socket(*args, **kwargs):
+        pytest.fail("a socket was created for a prohibited address")
+
+    monkeypatch.setattr(socket, "socket", unexpected_socket)
+    with pytest.raises(SpeedTestError, match="no public network address"):
+        _public_connection(("example.test", 443), 1)
+
+
+@pytest.mark.parametrize(
+    ("family", "sockaddr"),
+    [
+        (socket.AF_INET, ("8.8.8.8", 443)),
+        (socket.AF_INET6, ("2001:4860:4860::8888", 443, 0, 0)),
+    ],
+)
+def test_public_connection_connects_to_validated_sockaddr_without_reresolving(monkeypatch, family, sockaddr) -> None:
+    from speedpup.core.speedtest import _connection
+
+    lookups = []
+    connected = []
+    created = []
+
+    def resolve(host, port, **kwargs):
+        lookups.append((host, port, kwargs))
+        assert len(lookups) == 1, "a second DNS lookup could invalidate the address check"
+        return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    class FakeSocket:
+        def settimeout(self, timeout):
+            assert timeout == 2
+
+        def setsockopt(self, *args):
+            pass
+
+        def connect(self, address):
+            connected.append(address)
+
+        def close(self):
+            pass
+
+    def make_socket(actual_family, kind, protocol):
+        created.append((actual_family, kind, protocol))
+        return FakeSocket()
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(socket, "socket", make_socket)
+    connection = _connection("http://example.test:443/ping", 2)
+    connection.connect()
+
+    assert isinstance(connection.sock, FakeSocket)
+    assert lookups == [("example.test", 443, {"type": socket.SOCK_STREAM})]
+    assert created == [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP)]
+    assert connected == [sockaddr]
+
+
 def test_discovery_redirect_rejects_cross_origin_and_downgrade() -> None:
     handler = _ListRedirectHandler()
     request = urllib.request.Request("https://librespeed.org/backend-servers/servers.php")

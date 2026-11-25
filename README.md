@@ -21,6 +21,14 @@ python3 -m venv .venv
 
 The installed command `speedpup-portable` is also available in the active environment. Assets are resolved from the project and installed data paths, so launching from another working directory works.
 
+Run the test suite after installing the development dependencies:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
+```
+
+On Windows PowerShell, use `.venv\Scripts\python.exe` and set `$env:QT_QPA_PLATFORM = "offscreen"` before running `-m pytest -q`.
+
 ## Measurement and privacy
 
 The app contacts the LibreSpeed server-list endpoint when the user refreshes servers or starts a test. A test transfers data to the selected public volunteer server. HTTP latency is measured with requests to the server's empty response endpoint; it is not ICMP ping. Download Mbps uses received bytes and upload Mbps counts completed payloads accepted with a successful HTTP response, divided by elapsed transfer time using decimal megabits. No analytics, accounts, telemetry, background service, or automatic bandwidth test is used.
@@ -33,7 +41,7 @@ Jitter, packet loss, DNS, bufferbloat, health assessment, recommendations and hi
 
 ## Platform status
 
-The initial development target is Linux. Windows and macOS are design targets but have not been verified. Cross-platform packaging is deferred.
+Linux, Windows, and macOS are target platforms. The GitHub Actions workflow is manually triggered to minimize runner usage and runs the full offscreen suite on all three with Python 3.11 and 3.14; its hosted results are pending publication and execution. The Linux application has been checked in native XFCE. Windows and macOS native desktop behavior and standalone distributions remain unverified, and cross-platform packaging is deferred. Passing offscreen tests does not establish native desktop behavior.
 
 ## License
 
