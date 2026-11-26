@@ -22,4 +22,4 @@ The app makes no background bandwidth measurements, telemetry, account requests 
 
 ## Deferred work and limits
 
-Live system monitoring, DNS benchmarking, ICMP loss, dedicated jitter, bufferbloat, gateway checks, health scoring, recommendations, persistent history and exports are not implemented. The health and recommendation panels explicitly report insufficient evidence. Windows and macOS, app packaging and installations outside a source checkout have not been runtime-tested.
+At the Phase 1 checkpoint, live system monitoring, DNS benchmarking, ICMP loss, dedicated jitter, bufferbloat, gateway checks, health scoring, recommendations, persistent history and exports were not implemented. Phase 2 adds passive interface monitoring; see the README for its current scope. The health and recommendation panels explicitly report insufficient evidence. Windows and macOS native desktop behavior and app packaging remain unverified.

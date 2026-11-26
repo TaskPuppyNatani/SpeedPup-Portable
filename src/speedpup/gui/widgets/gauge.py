@@ -20,6 +20,9 @@ class SpeedGauge(QWidget):
         self.color = QColor(color)
         self._value = 0.0
         self._has_value = False
+        self.stable_scale = False
+        self._scale = 10.0
+        self._lower_samples = 0
         self._animation = QPropertyAnimation(self, b"animatedValue", self)
         self._animation.setDuration(260)
         self.setMinimumSize(190, 168)
@@ -44,12 +47,26 @@ class SpeedGauge(QWidget):
     def set_measurement(self, value: float | None, animate: bool = True) -> None:
         if value is None:
             self._has_value = False
+            self._scale = 10.0
+            self._lower_samples = 0
             self._animation.stop()
             self.animatedValue = 0.0
             self.update()
             return
         measurement = max(0.0, float(value))
         self._has_value = True
+        if self.stable_scale:
+            needed = self.scale_max_for(measurement)
+            if needed > self._scale:
+                self._scale = needed
+                self._lower_samples = 0
+            elif measurement < self._scale * 0.25 and needed < self._scale:
+                self._lower_samples += 1
+                if self._lower_samples >= 8:
+                    self._scale = needed
+                    self._lower_samples = 0
+            else:
+                self._lower_samples = 0
         if animate:
             self._animation.stop()
             self._animation.setStartValue(self._value)
@@ -83,6 +100,8 @@ class SpeedGauge(QWidget):
         painter.drawArc(arc_rect, 210 * 16, -240 * 16)
 
         capacity = self.scale_max_for(self._value if self._has_value else 0.0)
+        if self.stable_scale and self._has_value:
+            capacity = max(self._scale, capacity)
         ratio = min(1.0, self._value / capacity) if capacity else 0.0
         if ratio > 0:
             painter.setPen(QPen(self.color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))

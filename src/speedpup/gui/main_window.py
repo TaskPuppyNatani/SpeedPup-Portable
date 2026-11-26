@@ -28,6 +28,8 @@ from speedpup.gui.theme import ERROR, GREEN, MUTED, PURPLE, SUBTLE, TEXT
 from speedpup.gui.widgets.chart import ThroughputChart
 from speedpup.gui.widgets.gauge import SpeedGauge
 from speedpup.gui.workers import NetworkWorker
+from speedpup.gui.monitor_view import MonitorView
+from speedpup.gui.monitor_worker import MonitorWorker
 
 
 NAV_ITEMS = [
@@ -89,6 +91,7 @@ class MainWindow(QMainWindow):
 
         self._build_root()
         self._build_speed_page()
+        self._build_monitor_page()
         self._build_planned_pages()
         self._build_about_page()
         self._nav_buttons[0].setChecked(True)
@@ -308,17 +311,124 @@ class MainWindow(QMainWindow):
         return frame
 
     def _build_planned_pages(self) -> None:
-        for title in ("Live Monitor", "Diagnostics", "Analysis", "History", "Settings"):
+        for title in ("Diagnostics", "Analysis", "History", "Settings"):
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.setContentsMargins(24, 22, 24, 22)
             card, card_layout = _card(title, "Planned feature")
-            note = _label("This area is not implemented in Phase 1. No monitoring or background network activity is running.", color=MUTED)
+            note = _label("This area is planned for a later phase.", color=MUTED)
             note.setWordWrap(True)
             card_layout.addWidget(note)
             layout.addWidget(card)
             layout.addStretch(1)
             self._stack.addWidget(page)
+
+    def _build_monitor_page(self) -> None:
+        self.monitor_view = MonitorView()
+        self._stack.addWidget(self.monitor_view)
+        self._monitor_worker = None
+        self._monitor_combo_state = None
+        self._monitor_running = False
+        self._monitor_paused = False
+        view = self.monitor_view
+        view.start_requested.connect(lambda: self._monitor_command('start'))
+        view.pause_requested.connect(lambda: self._monitor_command('pause'))
+        view.reset_requested.connect(lambda: self._monitor_command('reset'))
+        view.refresh_requested.connect(lambda: self._monitor_command('refresh'))
+        view.selection_requested.connect(lambda value: self._monitor_command('select', value))
+        view.interval_requested.connect(lambda value: self._monitor_command('interval', value))
+
+    def _monitor_command(self, name, value=None) -> None:
+        if self._close_when_idle:
+            return
+        if name == 'start':
+            self.monitor_view.start_button.setEnabled(False)
+            self.monitor_view.start_button.setText('Starting monitoring…')
+            self.monitor_view.status.setText('Starting monitoring…')
+        if self._monitor_worker is None:
+            self._monitor_worker = MonitorWorker(parent=self)
+            self._monitor_worker.updated.connect(self._on_monitor_update)
+            self._monitor_worker.error.connect(self._on_monitor_error)
+            self._monitor_worker.finished.connect(self._on_monitor_finished)
+            self._monitor_worker.start()
+        self._monitor_worker.command(name, value)
+
+    def _on_monitor_error(self, message: str) -> None:
+        self.monitor_view.status.setText(f'Monitor unavailable: {message}')
+        self.monitor_view.start_button.setEnabled(not self._monitor_running or self._monitor_paused)
+        self.monitor_view.start_button.setText(
+            '▶  Resume monitoring' if self._monitor_paused
+            else 'Monitoring active' if self._monitor_running
+            else '▶  Start monitoring'
+        )
+        self.monitor_view.download.set_measurement(None, animate=False)
+        self.monitor_view.upload.set_measurement(None, animate=False)
+
+    @staticmethod
+    def _format_bytes(amount: int) -> str:
+        value = float(amount)
+        for unit in ('B', 'kB', 'MB', 'GB', 'TB', 'PB'):
+            if value < 1000 or unit == 'PB':
+                return f'{value:.0f} {unit}' if unit == 'B' else f'{value:.2f} {unit}'
+            value /= 1000
+        return 'Unavailable'
+
+    def _on_monitor_update(self, data) -> None:
+        view = self.monitor_view
+        interfaces = data['interfaces']
+        selected = data['selected']
+        combo_state = (tuple(item.name for item in interfaces), data['automatic'], selected if not data['automatic'] else None)
+        if combo_state != self._monitor_combo_state:
+            view.interface_combo.blockSignals(True)
+            view.interface_combo.clear()
+            view.interface_combo.addItem('Automatic', None)
+            for item in interfaces:
+                view.interface_combo.addItem(item.name, item.name)
+            if not data['automatic'] and selected:
+                index = view.interface_combo.findData(selected)
+                if index < 0:
+                    view.interface_combo.addItem(f'{selected} · unavailable', selected)
+                    index = view.interface_combo.count() - 1
+                view.interface_combo.setCurrentIndex(index)
+            view.interface_combo.blockSignals(False)
+            self._monitor_combo_state = combo_state
+        automatic_label = f'Automatic · {selected}' if data['automatic'] and selected else 'Automatic'
+        if view.interface_combo.itemText(0) != automatic_label:
+            view.interface_combo.setItemText(0, automatic_label)
+        running, paused = data['running'], data['paused']
+        self._monitor_running, self._monitor_paused = running, paused
+        view.start_button.setText('▶  Resume monitoring' if paused else 'Monitoring active' if running else '▶  Start monitoring')
+        view.start_button.setEnabled(not running or paused)
+        view.pause_button.setEnabled(running and not paused)
+        history = data['history']
+        point = history[-1] if history else None
+        current = bool(running and not paused and point and point.download_mbps is not None and point.upload_mbps is not None)
+        view.download.set_measurement(point.download_mbps if current else None, animate=False)
+        view.upload.set_measurement(point.upload_mbps if current else None, animate=False)
+        view.chart.set_points([(p.timestamp, p.download_mbps, p.upload_mbps) for p in history])
+        status = 'Paused' if paused else 'Active' if running else 'Not started'
+        detail = (f'{status} · {selected or "No available interface"}'
+                  + (f' · {point.gap_reason}' if point and point.gap_reason and running and not paused else ''))
+        if data['discovery_error']:
+            detail += f' · Interface discovery unavailable: {data["discovery_error"]}'
+        view.status.setText(detail + ' · Changing interface starts a new session.')
+        view.side_status.setText(detail)
+        info = next((item for item in interfaces if item.name == selected), None)
+        if info:
+            ipv4 = [address for address in info.addresses if ':' not in address]
+            ipv6 = [address for address in info.addresses if ':' in address]
+            view.details.setText(f'Adapter: {info.name}\nIPv4: {", ".join(ipv4) or "Unavailable"}\nIPv6: {", ".join(ipv6) or "Unavailable"}\nMAC: {info.mac_address or "Unavailable"}\nReported link speed: {str(info.speed_mbps) + " Mbps" if info.speed_mbps else "Unavailable"}\nOperational state: {"Up" if info.is_up else "Down"}')
+            view.summary.setText(f'Operational state: {"Up" if info.is_up else "Down"}\nConnection type: {info.connection_type or "Unavailable"}\nGateway: Unavailable\nWi-Fi SSID: Unavailable\nWi-Fi signal: Unavailable')
+        else:
+            view.details.setText('Selected interface unavailable.' if selected else 'No interface selected.')
+            view.summary.setText('Operational state: Unavailable\nConnection type: Unavailable\nGateway: Unavailable\nWi-Fi SSID: Unavailable\nWi-Fi signal: Unavailable')
+        received, sent = data['totals_bytes']
+        packets_received, packets_sent = data['totals_packets']
+        view.totals.setText(f'Received: {self._format_bytes(received)}\nSent: {self._format_bytes(sent)}\nPackets received: {packets_received if packets_received is not None else "Unavailable"}\nPackets sent: {packets_sent if packets_sent is not None else "Unavailable"}')
+
+    def _on_monitor_finished(self) -> None:
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
 
     def _build_about_page(self) -> None:
         page = QWidget()
@@ -493,10 +603,16 @@ class MainWindow(QMainWindow):
             self.status_label.setStyleSheet(f"color: {MUTED};")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt event name
+        if self._monitor_worker is not None and self._monitor_worker.isRunning():
+            self._close_when_idle = True
+            self._monitor_worker.shutdown()
         if self._worker is not None and self._worker.isRunning():
             self._close_when_idle = True
             self._cancel_test()
             self.status_label.setText("Stopping the active network operation before closing…")
+            event.ignore()
+            return
+        if self._monitor_worker is not None and self._monitor_worker.isRunning():
             event.ignore()
             return
         event.accept()
