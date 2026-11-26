@@ -9,3 +9,7 @@ dist/
 *.egg-info/
 .DS_Store
 Thumbs.db
+
+# Local AI development policies
+/CODEX-USAGE-SUBAGENT-POLICYv*.MD
+/MODEL-NEUTRAL-USAGE-SUBAGENT-POLICYv*.MD
