@@ -22,8 +22,16 @@ from PySide6.QtWidgets import (
 )
 
 from speedpup import __version__
+from speedpup.core.diagnostics import (
+    DiagnosticRequest,
+    DiagnosticsBackend,
+    UnavailableDiagnosticsBackend,
+)
 from speedpup.core.models import Server, TestProgress, TestResult
 from speedpup.core.speedtest import SpeedTestEngine
+from speedpup.gui.diagnostics_view import DiagnosticsView
+from speedpup.core.diagnostics_backend import NetworkDiagnosticsBackend
+from speedpup.gui.diagnostics_worker import DiagnosticsWorker
 from speedpup.gui.theme import ERROR, GREEN, MUTED, PURPLE, SUBTLE, TEXT
 from speedpup.gui.widgets.chart import ThroughputChart
 from speedpup.gui.widgets.gauge import SpeedGauge
@@ -78,12 +86,14 @@ def _card(title: str, description: str | None = None) -> tuple[QFrame, QVBoxLayo
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, diagnostics_backend: DiagnosticsBackend | None = None) -> None:
         super().__init__()
         self.setWindowTitle(f"SpeedPup Portable {__version__}")
         self.resize(1320, 840)
         self.setMinimumSize(QSize(1000, 680))
         self._engine = SpeedTestEngine()
+        self._diagnostics_backend: DiagnosticsBackend = diagnostics_backend or NetworkDiagnosticsBackend()
+        self._diagnostics_worker = None
         self._worker: NetworkWorker | None = None
         self._server_cache: list[Server] = []
         self._close_when_idle = False
@@ -92,6 +102,7 @@ class MainWindow(QMainWindow):
         self._build_root()
         self._build_speed_page()
         self._build_monitor_page()
+        self._build_diagnostics_page()
         self._build_planned_pages()
         self._build_about_page()
         self._nav_buttons[0].setChecked(True)
@@ -311,7 +322,7 @@ class MainWindow(QMainWindow):
         return frame
 
     def _build_planned_pages(self) -> None:
-        for title in ("Diagnostics", "Analysis", "History", "Settings"):
+        for title in ("Analysis", "History", "Settings"):
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.setContentsMargins(24, 22, 24, 22)
@@ -322,6 +333,63 @@ class MainWindow(QMainWindow):
             layout.addWidget(card)
             layout.addStretch(1)
             self._stack.addWidget(page)
+
+    def _build_diagnostics_page(self) -> None:
+        self.diagnostics_view = DiagnosticsView()
+        self.diagnostics_view.set_target_options(self._diagnostics_backend.target_options())
+        self.diagnostics_view.set_resolver_options(self._diagnostics_backend.resolver_options())
+        self.diagnostics_view.set_backend_availability(
+            self._diagnostics_backend.is_available,
+            self._diagnostics_backend.unavailable_reason,
+        )
+        self.diagnostics_view.run_requested.connect(self._on_diagnostics_run_requested)
+        self.diagnostics_view.cancel_requested.connect(self._on_diagnostics_cancel_requested)
+        self.diagnostics_view.reset_requested.connect(self._on_diagnostics_reset_requested)
+        self._stack.addWidget(self.diagnostics_view)
+
+    def _on_diagnostics_run_requested(self, _request: DiagnosticRequest) -> None:
+        if self._close_when_idle:
+            return
+        if not self._diagnostics_backend.is_available:
+            self.diagnostics_view.set_backend_availability(
+                False,
+                self._diagnostics_backend.unavailable_reason,
+            )
+            return
+        if self._worker is not None or self._diagnostics_worker is not None:
+            self.diagnostics_view.apply_error("A network test is already running.")
+            return
+        worker = DiagnosticsWorker(self._diagnostics_backend, _request, self)
+        self._diagnostics_worker = worker
+        self.diagnostics_view.apply_running_state(_request)
+        self.start_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        worker.progress.connect(self.diagnostics_view.apply_progress)
+        worker.result_ready.connect(self.diagnostics_view.apply_result)
+        worker.failed.connect(self.diagnostics_view.apply_error)
+        worker.cancelled.connect(self.diagnostics_view.apply_cancelled)
+        worker.finished.connect(self._on_diagnostics_finished)
+        worker.start()
+
+    def _on_diagnostics_cancel_requested(self) -> None:
+        if self._diagnostics_worker is not None:
+            self._diagnostics_worker.cancel()
+            self.diagnostics_view.apply_cancelling_state()
+
+    def _on_diagnostics_finished(self) -> None:
+        worker = self._diagnostics_worker
+        self._diagnostics_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if not self._close_when_idle:
+            self.start_button.setEnabled(True)
+            self.refresh_button.setEnabled(True)
+        else:
+            QTimer.singleShot(0, self.close)
+
+    def _on_diagnostics_reset_requested(self) -> None:
+        # View state has already been reset; Phase 3B may clear cached session state here.
+        return
 
     def _build_monitor_page(self) -> None:
         self.monitor_view = MonitorView()
@@ -490,7 +558,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _is_busy(self) -> bool:
-        return self._worker is not None and self._worker.isRunning()
+        return self._worker is not None or self._diagnostics_worker is not None
 
     def _set_busy(self, busy: bool) -> None:
         self.start_button.setEnabled(not busy)
@@ -603,6 +671,11 @@ class MainWindow(QMainWindow):
             self.status_label.setStyleSheet(f"color: {MUTED};")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt event name
+        if self._diagnostics_worker is not None and self._diagnostics_worker.isRunning():
+            self._close_when_idle = True
+            self._on_diagnostics_cancel_requested()
+            event.ignore()
+            return
         if self._monitor_worker is not None and self._monitor_worker.isRunning():
             self._close_when_idle = True
             self._monitor_worker.shutdown()

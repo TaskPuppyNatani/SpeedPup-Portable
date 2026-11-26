@@ -12,6 +12,8 @@ MUTED = "#b8b1c7"
 SUBTLE = "#827a92"
 BORDER = "#453b55"
 ERROR = "#ff7b8b"
+WARNING = "#f2b84b"
+LOSS_MARKER = "#ff5c8a"
 
 APP_STYLESHEET = f"""
 QWidget {{
@@ -53,6 +55,30 @@ QPushButton#startButton {{
         stop:0 #a6ed62, stop:1 #5aa82d);
 }}
 QPushButton#startButton:hover {{ background: #b4f873; }}
+QPushButton#startButton:disabled {{
+    color: #7c7588;
+    border: 1px solid #3c3648;
+    background: #221f2b;
+}}
+QFrame#diagBanner {{
+    background: rgba(116, 67, 152, 0.16);
+    border: 1px solid #594375;
+    border-radius: 10px;
+}}
+QFrame#diagMetricGreen {{
+    background: qlineargradient(x1:0, y1:0, x2:0.9, y2:1,
+        stop:0 #222030, stop:1 #17151f);
+    border: 1px solid #3d354e;
+    border-left: 3px solid {GREEN};
+    border-radius: 14px;
+}}
+QFrame#diagMetricPurple {{
+    background: qlineargradient(x1:0, y1:0, x2:0.9, y2:1,
+        stop:0 #231f33, stop:1 #17151f);
+    border: 1px solid #443959;
+    border-left: 3px solid {PURPLE};
+    border-radius: 14px;
+}}
 QPushButton#navButton {{ text-align: left; padding: 11px 14px; border: 0; background: transparent; font-size: 11pt; }}
 QPushButton#navButton:hover {{ background: #272331; }}
 QPushButton#navButton:checked {{

@@ -1,14 +1,14 @@
-# MODEL-NEUTRAL USAGE + SUBAGENT POLICY v2.7
+# MODEL-NEUTRAL USAGE + SUBAGENT POLICY v2.8
 
-**Version:** 2.7
-**Revises:** MODEL-NEUTRAL-USAGE-SUBAGENT-POLICYv2.6.1.MD
-**Change focus:** Make justified native subagent delegation an ordinary engineering option for non-Codex coding agents; preserve verified same-model routing and the cumulative four-subagent ceiling; complete consequential independent review **before** sealing rather than after.
+**Version:** 2.8
+**Revises:** MODEL-NEUTRAL-USAGE-SUBAGENT-POLICYv2.7.MD
+**Change focus:** Distinguish native primary execution handoffs and built-in model routing from discretionary child-agent delegation; require explicit, bounded authorization for otherwise prohibited or unverified native routing; preserve verified same-model delegation, the cumulative four-subagent ceiling, stricter user/project restrictions, and consequential pre-seal review.
 
 Reusable policy for non-Codex coding agents, whether cloud-hosted or locally running, including Gemini, Qwen, and other compatible agent environments. Apply when the user or project selects it. Codex/gstack tasks should use the separate Codex policy unless explicitly directed otherwise.
 
 **Platform-native subagents are permitted.** Agents may use their own supported delegation tools, native collaboration APIs, child-agent frameworks, or verified local harnesses. They do **not** need to run through Codex or use GPT-6 Luna Max merely because a separate Codex-specific policy requires Luna Max. However, this policy's verified same-underlying-model rule and any **explicitly applicable stricter user/project restriction** remain binding. Do not assume a native spawn automatically inherits the parent's model; establish the effective route as described in Section 12.
 
-**Model-matching examples:** A primary agent running **Gemini 4 Neon** may use confirmed **Gemini 4 Neon** subagents through its native tools; a primary running **Qwen3.8 Flash Next** may use confirmed **Qwen3.8 Flash Next** subagents. A different model or unverified fallback is not an acceptable substitution under this policy.
+**Model-matching examples:** A primary agent running **Gemini 4 Neon** may use confirmed **Gemini 4 Neon** subagents through its native tools; a primary running **Qwen3.8 Flash Next** may use confirmed **Qwen3.8 Flash Next** subagents. A different model or unverified fallback is not an acceptable substitution for a discretionary subagent under this policy. Native primary execution transitions and built-in model offloading are governed separately by Section 12.7; they are not blanket exceptions to model restrictions.
 
 The goal is to preserve correctness, durability, security, and architectural quality while minimizing unnecessary model usage, duplicated investigation, avoidable rework, and redundant verification. **Optimization is about the best result for total effort, not the lowest possible subagent count.**
 
@@ -291,11 +291,11 @@ Avoid excessive combinatorial testing unless each dimension represents meaningfu
 
 ---
 
-## 12. NATIVE, VERIFIED SAME-MODEL SUBAGENTS
+## 12. NATIVE, VERIFIED SAME-MODEL SUBAGENTS AND EXECUTION ROUTING
 
 **Native delegation is an ordinary permitted engineering tool.** The primary agent should proactively consider whether its own supported subagent system could deliver a distinct implementation slice, test an independent hypothesis, validate an external contract, or strengthen a consequential review. Do not reject beneficial delegation merely to minimize the number of agents or reported usage.
 
-**The hard ceiling is four subagents per entire task, counted cumulatively.** This covers every child spawned through native tools, alternate provider tools, nested child-agent delegation, retries, restarts, phases, reviews, and handoffs of the same task. **Four is a maximum, not a target.** Previously spawned children count even when they fail or finish early. The primary agent owns the count; never evade it by relabeling or restarting a phase. Do not permit uncontrolled recursive spawning.
+**The hard ceiling is four subagents per entire task, counted cumulatively.** This covers every child spawned through native tools, alternate provider tools, nested child-agent delegation, retries, restarts, phases, reviews, and handoffs of the same task. **Four is a maximum, not a target.** Previously spawned children count even when they fail or finish early. The primary agent owns the count; never evade it by relabeling or restarting a phase. Do not permit uncontrolled recursive spawning. Genuine native primary execution handoffs and non-child model routing, classified under Section 12.7, are accounted for separately; they do not reset or increase the cumulative child-agent allowance. Every actual child spawn still counts, regardless of the interface or label used.
 
 ### 12.1 Model matching for native agents
 
@@ -318,7 +318,7 @@ A platform's native agent feature is a valid **way to spawn**, not by itself pro
 
 Use the simplest applicable path. Reuse trustworthy routing evidence during an unchanged session; recheck only if the agent configuration, effective route, backend, or tool contract changes. **If none of these paths establishes a match, use zero subagents and continue with the primary agent where feasible.** Do not silently substitute another model or stall a bounded task repeatedly probing routes.
 
-**Stricter requirements still win:** If a user explicitly imposes a specifically named subagent model for the current task (such as GPT-6 Luna Max), the verified route must also meet that restriction. This document does not silently override a separate, explicitly applicable user, repository, or platform restriction. Conversely, don't transplant a rule scoped specifically to Codex into unrelated Gemini/Qwen tasks without an instruction requiring it.
+**Stricter requirements still win:** If a user explicitly imposes a specifically named subagent model for the current task (such as GPT-6 Luna Max), the verified route must also meet that restriction. This document does not silently override a separate, explicitly applicable user, repository, or platform restriction. Conversely, don't transplant a rule scoped specifically to Codex into unrelated Gemini/Qwen tasks without an instruction requiring it. Section 12.7 permits narrowly authorized exceptions for genuine native primary execution routing only; it does not relax any requirement for actual subagents.
 
 ### 12.2 Risk- and value-based delegation
 
@@ -393,11 +393,70 @@ A small routine fix does not automatically need independent review. This is a **
 - If a P1/P0 issue is found, keep the work unsealed until corrected and reviewed. Do not manufacture a loop of seal → review → reseal.
 - A review after merging or sealing may still uncover defects, but it is not a substitute for a planned pre-seal review.
 
+### 12.7 Native primary execution handoffs and built-in model offloading
+
+Some agent harnesses separate planning from implementation or route routine operations to another model within their native execution architecture. Classify the actual mechanism by its behavior, not by its marketing name, tool name, or claimed cost.
+
+#### 12.7.1 Classify the mechanism
+
+- **Mandatory native primary execution handoff:** A harness-required sequential transfer of primary task responsibility, such as moving from read-only planning to implementation. The receiving execution agent continues the same task; it is not an independently assigned child worker.
+- **Built-in primary model offloading:** Model substitution or routing of routine operations within the selected native execution mode, without creating independently tasked child agents. The primary workflow remains responsible for the result. This may occur more than once and is not necessarily a mandatory planning-to-execution transition.
+- **Discretionary subagent delegation:** Explicit or implicit creation of independently tasked child agents, including parallel or sequential child assignments. All such spawns remain governed by Sections 12.1–12.6, the applicable user/project restrictions, and the cumulative ceiling of four.
+
+Use trustworthy available tool contracts, effective configuration, documented implementation, or observed runtime/tool evidence to establish the mechanism. A harness label, provider name, selected tier, or an agent's own assertion alone does not prove its implementation or the identity of the execution model.
+
+If the mechanism cannot be distinguished from child-agent creation, apply the stricter subagent rules. Do not proceed with unverified or unauthorized child creation. Do not call an ordinary child assignment a handoff or offload to avoid the ceiling. A hidden execution-model identity is different from an unknown delegation mechanism: an exception may address the former, not excuse the latter.
+
+#### 12.7.2 Authorization checkpoint
+
+Before invoking a native transition, or beginning work in a mode that may offload automatically, determine whether the effective model route and execution architecture satisfy the current task's restrictions.
+
+If the route differs from the authorized primary model, may substitute a different model, cannot be verified, or otherwise conflicts with a task-wide model restriction, stop before the affected operation and obtain explicit user authorization for the specific native mechanism. If the selected mode can offload before a planning step, obtain authorization before using that mode for task work. Safe work already permitted under the existing restrictions may continue only if it cannot trigger the prohibited routing.
+
+Selecting an orchestrator in a model picker, using a provider's default mode, or requesting implementation is not by itself consent to override a model restriction. An explicit authorization in the original task prompt is sufficient if it contains the required boundaries; do not request it again when nothing material has changed.
+
+Authorization must specify:
+
+- the exact task or phase, harness, selected planning/primary model, and permitted native transition or routing mode;
+- the reason for the transition or offloading, including whether it is mandatory;
+- the known or advertised execution route, and whether the actual model identity/variant is verified or explicitly allowed to remain unverified;
+- the maximum number of explicit handoff invocations and any user-controllable offload limit;
+- the permitted offloading phase/scope, if automatic routing is authorized; if no reliable per-operation limit or count is exposed, disclose that before authorization and obtain express consent to that limitation within a bounded task phase;
+- the maximum additional discretionary subagents (zero by default for an exception unless separately authorized under Sections 12.1–12.6), and whether external orchestration is permitted;
+- unchanged permissions, scope, acceptance criteria, repository-operation restrictions, verification gates, and stop conditions;
+- any specific user/project model restriction being excepted, and the exception's expiration.
+
+The exception must be explicit, narrow, task-scoped, non-transferable, and no broader than needed. It cannot override platform safety or permission boundaries, increase the four-child ceiling, or authorize unverified discretionary subagents. Any stricter restriction not expressly excepted remains binding. Authorization for a single mandatory handoff does not authorize additional handoffs, optional offloading, automatic routing beyond that handoff, or child-agent spawns.
+
+If a required handoff cannot be authorized or constrained, report the blocker and offer a compatible single-model execution path if available. Do not silently switch modes or models. If automatic offloading cannot be distinguished from child spawning or cannot be bounded to the authorized task, do not use that mode under this exception mechanism.
+
+#### 12.7.3 Transfer constraints, retain accountability
+
+Before the authorized transition, carry forward the existing plan, relevant verified evidence, task identifier, exact exception, cumulative child count, file ownership, scope and permission boundaries, acceptance criteria, required verification, reporting requirements, repository-operation restrictions, and stop conditions into the receiving execution context using supported native mechanisms.
+
+Establish that the receiving context will retain these instructions using the available trustworthy handoff contract or transferred plan. Do not merely assume that it inherits them. If the required constraints cannot be carried forward, do not initiate the transition. The receiving agent must honor the transferred constraints and must not treat the transition as fresh permission to broaden the task.
+
+Reuse completed planning and valid evidence instead of restarting investigation. Recheck only when new evidence, a changed contract, or missing context makes it necessary.
+
+The original primary workflow retains responsibility for the integrated result and final report. A change of model does not itself constitute independent review or satisfy a planned pre-seal gate. Any separately authorized child must satisfy Section 12.1 against the applicable effective primary route and any stricter named-model rule; where matching cannot be established, use zero children. Keep the same cumulative child count across phases and model transitions.
+
+Stop before any further unauthorized transition or delegation. If an unexpected substitution or unapproved spawn is discovered, stop the affected work, disclose the deviation and actual count if known, preserve existing work, and seek direction before proceeding. Do not claim compliance for activity that cannot be verified. The exception expires at completion, termination, revocation, or the end of the authorized task phase, whichever comes first. Exhausting the permitted handoff count prohibits further handoffs; it does not prevent the already authorized execution agent from finishing within the original phase and boundaries. A continuation or later task does not inherit an expired exception; all original restrictions apply unless the user issues fresh authorization.
+
+#### 12.7.4 Evidence, efficiency, and reporting
+
+Record selected/advertised model routes separately from verified effective execution identities. Do not infer actual execution identity from tier labels (`inherit`, `flash_lite`, `flash`, `pro`), marketing descriptions, speed, cost, self-identification, or the fact that an orchestration mode was selected. If identity or internal offload counts are not exposed, report them as unverified or unavailable, not as a guessed model or zero.
+
+Report native routing separately from discretionary subagent usage under Section 18. Count actual child spawns cumulatively even if they occur during a handoff. Distinguish observed tool activity, authoritative configuration, and agent-reported behavior; do not claim to have audited hidden provider internals. Where a count is opaque, state the limitation rather than certifying an unobservable count.
+
+A successful implementation or reduced elapsed time does not establish lower token consumption, equivalent quality, or lower cost. Compare directly available comparable measurements and verification outcomes before making efficiency claims. Do not relax correctness or required independent review to make offloading appear successful.
+
+**Example (illustrative, not standing authorization):** Antigravity Orchestrator (Neon) reports a required `exit_plan_mode` transition, and the mode tooltip advertises possible routine offloading to Hydrogen. A user may authorize one mandatory transition for a named phase with the actual execution identity unverified, zero additional subagents, no external orchestration, unchanged permissions, and no commit/push/tag/seal/workflow dispatch. That authorization does not independently verify Hydrogen as the actual execution model or authorize optional offloading outside the permitted transition. If the mode requires additional automatic routing, that mechanism and its limits must be disclosed and separately covered by the user's authorization before use.
+
 ---
 
 ## 13. PROMPT DESIGN FOR PLATFORM-NATIVE AGENTS
 
-Give the primary agent an explicit delegation **decision**, not an arbitrary mandatory child count or a blanket ban. A native agent may proactively spawn its own verified same-model children within authorized scope; it does not need Codex tooling or per-spawn user approval.
+Give the primary agent an explicit delegation **decision**, not an arbitrary mandatory child count or a blanket ban. A native agent may proactively spawn its own verified same-model children within authorized scope; it does not need Codex tooling or per-spawn user approval. An explicit zero-child or lower-limit instruction still controls. Separately identify whether the selected harness requires primary model handoffs or offers automatic offloading; use Section 12.7 when those mechanisms conflict with model restrictions.
 
 Prompts should establish:
 
@@ -408,7 +467,8 @@ Prompts should establish:
 - **up to four cumulative native same-model subagents** when beneficial, with zero still fine;
 - that Path A, B, **or** C can verify model matching, and the agent should not demand self-identification when an authoritative inheritance or fixed-backend route suffices;
 - that an explicitly applicable stricter named-model restriction must still be honored;
-- pre-seal completion of any planned consequential review.
+- pre-seal completion of any planned consequential review;
+- for native routing exceptions, the explicit authorization record, permitted transition count/offloading scope, applicable restrictions, and expiration under Section 12.7.
 
 ### Typical prompt choices
 
@@ -450,6 +510,8 @@ Do not re-run or re-read evidence unless:
 
 Independent duplication is acceptable only when independent verification itself has value.
 
+For authorized native routing, carry forward the evidence and original task constraints under Section 12.7.3. A handoff is not a reason to restart completed planning, erase prior verification, or reset the cumulative delegation count.
+
 ---
 
 ## 15. REPOSITORY-WIDE REVIEW RULE
@@ -481,10 +543,10 @@ Even during a repository-wide review:
 
 For most bounded tasks, prefer:
 
-1. Establish the requirement, risk, acceptance criteria, and **evidence threshold** for completion.
+1. Establish the requirement, risk, acceptance criteria, and **evidence threshold** for completion. Before task work in a mode that can automatically route across models, check its mechanism and authorization under Section 12.7.
 2. Inspect the minimum relevant code and, for integrations, check the real external command/API behavior where feasible.
 3. Identify specific useful native subagent lanes or independent checks; verify the model route **before** spawning.
-4. Plan the smallest coherent implementation and coordinate file ownership if delegating.
+4. Plan the smallest coherent implementation and coordinate file ownership if delegating. Before an otherwise prohibited native execution handoff, obtain the Section 12.7 authorization and transfer the complete task constraints and verified evidence; do not proceed if the transition cannot preserve them.
 5. Implement and run focused tests.
 6. Complete **planned, consequential independent review before sealing**; fix confirmed findings.
 7. Verify the final delta; widen testing only when changes, release work, or remaining uncertainty justify it.
@@ -512,6 +574,7 @@ Good optimization:
 - focused tests;
 - proactive, justified platform-native subagents for distinct implementation, debugging, contract checks, regression coverage, and pre-seal review when their value outweighs coordination cost;
 - avoiding duplicate verification;
+- explicitly authorized native execution routing where appropriate, with preserved constraints and measured rather than assumed efficiency benefits;
 - stopping when sufficient evidence exists.
 
 Bad optimization:
@@ -523,6 +586,7 @@ Bad optimization:
 - avoiding required architectural analysis;
 - failing to investigate a real regression risk;
 - refusing beneficial native delegation solely to minimize child count;
+- silently substituting models, treating opaque routing as proof of zero children, or using native handoff labels to bypass delegation limits;
 - placing a known-needed independent review **after** sealing rather than before it.
 
 Correctness remains the priority.
@@ -607,7 +671,7 @@ If no meaningful uncertainty remains, state:
 Report:
 
 - Subagents used: `<0-4>` cumulatively for the whole task, including native and nested spawns.
-- Primary model: `<verified model name/ID if available; otherwise unavailable only if an authoritative Path B or C still proves same-model route>`.
+- Primary model: `<verified model name/ID if available; otherwise unavailable with the reason>`. When children are used, an unknown model ID is acceptable only if an authoritative Path B or C still proves the same-model route and all applicable named-model restrictions are satisfied.
 - Child model(s): `<verified model name/ID, or same primary route verified by Path B/C>`.
 - Purpose and distinct contribution of each child, including any independent pre-seal review.
 - Native delegation interface and route verification: `<explicit match | guaranteed native same-model inheritance | verified single-model local backend>`, with the trustworthy evidence.
@@ -617,6 +681,26 @@ Report:
 If none were used, state:
 
 `Subagents used: 0`
+
+Do not report zero as a verified total if child activity is unobservable; distinguish observed/agent-reported counts from unavailable counts and explain the limitation. An opaque count does not authorize otherwise prohibited delegation.
+
+### NATIVE EXECUTION HANDOFF / MODEL OFFLOADING (when applicable)
+
+Report this separately from SUBAGENTS whenever native routing was used, an exception was granted, or an unexpected transition was detected:
+
+- Harness, selected mode, and native transition/routing mechanism.
+- Planning/primary model and advertised potential execution model(s), distinguishing them from the actual verified execution model(s).
+- Actual execution model identity and variant: `<verified with evidence | unverified | unavailable>`.
+- Whether the mechanism was a mandatory primary handoff, built-in offloading, or an actual child spawn; evidence supporting classification.
+- Reason for the routing and whether it was mandatory.
+- Task-scoped user authorization, applicable exception, permitted handoff count/offload scope, additional-subagent limit, and expiration.
+- Explicit handoff invocations authorized and performed; offloading operations observed, or count unavailable if not exposed.
+- Additional discretionary subagents used, with the cumulative count reconciled under SUBAGENTS; whether external orchestration was used.
+- How the original constraints and planning evidence were transferred; any deviations, missing evidence, and actions taken.
+- Verification performed after the transition, including pending native acceptance or independent review where applicable.
+- Remaining uncertainty, including any distinction between observed activity and provider internals that cannot be independently inspected.
+
+Report phase-specific timing and usage under TIME and USAGE when directly available. Otherwise report only directly observed aggregate measurements, explicitly distinguishing missing telemetry from zero consumption. Do not claim cost or quality equivalence from elapsed time alone.
 
 ### TIME
 
@@ -667,7 +751,7 @@ If exact usage information is unavailable:
 
 The purpose of this policy is not to make an agent do less work.
 
-The purpose is to make agents do **less unnecessary work**, while allowing their own verified subagents to do useful work.
+The purpose is to make agents do **less unnecessary work**, while allowing their own verified subagents to do useful work and supporting explicitly authorized native execution architectures without weakening user control.
 
 The preferred task is:
 
