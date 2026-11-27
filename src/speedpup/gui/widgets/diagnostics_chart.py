@@ -10,7 +10,7 @@ from collections.abc import Sequence
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from speedpup.core.diagnostics import DiagnosticStage, LatencyLoadSample
@@ -23,6 +23,8 @@ _DEFAULT_STAGES: tuple[DiagnosticStage, ...] = (
     DiagnosticStage.UPLOAD_LOAD,
     DiagnosticStage.RECOVERY,
 )
+# Narrower than this and a stage label can only be drawn as an illegible fragment.
+MIN_LABEL_WIDTH = 30.0
 
 
 class SparklineWidget(QWidget):
@@ -223,6 +225,35 @@ class LatencyLoadChart(QWidget):
             step = 100.0
         return math.ceil(target / step) * step
 
+    def stage_label_layout(
+        self,
+        bands: Sequence[tuple[DiagnosticStage, float, float, object]],
+        plot: QRectF,
+        font: QFont,
+    ) -> list[tuple[QRectF, str]]:
+        """Compute the label rect and text drawn for each stage band.
+
+        Each rect is clamped to its own band (no minimum width bleeding past the
+        next band start). Text that does not fit is elided; a band too narrow to
+        show its stage name legibly gets no label at all.
+        """
+        metrics = QFontMetrics(font)
+        labels: list[tuple[QRectF, str]] = []
+        for stage, x0, x1, first_ts in bands:
+            band_width = max(0.0, x1 - x0)
+            rect = QRectF(x0, plot.bottom() + 4, band_width, 34)
+            name = stage.label
+            if band_width < MIN_LABEL_WIDTH:
+                # Below this the stage name cannot be shown legibly: omit instead of overlapping.
+                continue
+            text = metrics.elidedText(name, Qt.TextElideMode.ElideRight, int(band_width))
+            if first_ts is not None:
+                stamp = first_ts.strftime("%H:%M:%S")
+                if metrics.horizontalAdvance(f"({stamp})") <= band_width:
+                    text = f"{text}\n({stamp})"
+            labels.append((rect, text))
+        return labels
+
     def paintEvent(self, _event) -> None:  # noqa: N802 - Qt event name
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -300,15 +331,13 @@ class LatencyLoadChart(QWidget):
 
         # Stage vertical separators and bottom labels
         divider_pen = QPen(QColor("#483d5e"), 1.0, Qt.PenStyle.DashLine)
-        for idx, (stage, x0, x1, first_ts) in enumerate(bands):
+        for idx, (_stage, x0, _x1, _first_ts) in enumerate(bands):
             if idx > 0:
                 painter.setPen(divider_pen)
                 painter.drawLine(QPointF(x0, plot.top()), QPointF(x0, plot.bottom()))
-            label_rect = QRectF(x0, plot.bottom() + 4, max(24.0, x1 - x0), 34)
+        labels = self.stage_label_layout(bands, plot, axis_font)
+        for label_rect, text in labels:
             painter.setPen(QColor(MUTED))
-            text = stage.label
-            if first_ts is not None:
-                text = f"{text}\n({first_ts.strftime('%H:%M:%S')})"
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, text)
 
         if len(bands) == 1 and t_span > 0.0 and plot.width() >= 180:
@@ -391,11 +420,11 @@ class LatencyLoadChart(QWidget):
 
         bands: list[tuple[DiagnosticStage, float, float, object]] = []
         for idx, (stage, items) in enumerate(groups):
-            x0 = plot.left() if idx == 0 else (groups[idx - 1][1][-1][1] + items[0][1]) / 2.0
+            x0 = plot.left() if idx == 0 else items[0][1]
             x1 = (
                 plot.right()
                 if idx == len(groups) - 1
-                else (items[-1][1] + groups[idx + 1][1][0][1]) / 2.0
+                else groups[idx + 1][1][0][1]
             )
             first_ts = next((sample.timestamp for sample, _ in items if sample.timestamp is not None), None)
             bands.append((stage, x0, x1, first_ts))

@@ -35,6 +35,16 @@ class DiagnosticProfile(StrEnum):
         }[self]
 
 
+class DiagnosticLoadBudget(StrEnum):
+    LIGHT = 'light'
+    STANDARD = 'standard'
+    EXTENDED = 'extended'
+
+    @property
+    def mib(self) -> int:
+        return {self.LIGHT: 24, self.STANDARD: 128, self.EXTENDED: 256}[self]
+
+
 class DiagnosticStage(StrEnum):
     """Execution phases for diagnostic progress and load-response graphing."""
 
@@ -218,6 +228,11 @@ class DiagnosticRequest:
     profile: DiagnosticProfile = DiagnosticProfile.STANDARD
     resolver: str | None = None
     interface_name: str | None = None
+    load_budget: DiagnosticLoadBudget = DiagnosticLoadBudget.STANDARD
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.load_budget, DiagnosticLoadBudget):
+            raise ValueError('load_budget must be a DiagnosticLoadBudget')
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,8 +351,11 @@ def default_coverage_for_profile(
 ) -> tuple[DiagnosticCoverageItem, ...]:
     """Return expected test coverage items for the selected diagnostic profile."""
     items: list[DiagnosticCoverageItem] = []
+    # Quick and Standard do not attempt under-load measurement, so bufferbloat is
+    # not included in either profile. FULL attempts it.
+    load_profiles = (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD)
     for item_id, label in CANONICAL_COVERAGE:
-        included = not (profile is DiagnosticProfile.QUICK and item_id == "bufferbloat")
+        included = not (item_id == "bufferbloat" and profile in load_profiles)
         if not included:
             items.append(
                 DiagnosticCoverageItem(
@@ -345,7 +363,7 @@ def default_coverage_for_profile(
                     label=label,
                     included_in_profile=False,
                     status=CoverageStatus.SKIPPED,
-                    reason="Not included in Quick profile",
+                    reason="Not included in this profile",
                 )
             )
         elif not backend_available:
@@ -414,6 +432,10 @@ class DiagnosticResult:
     connection: ConnectionDetails = field(default_factory=ConnectionDetails)
     recommendations: tuple[DiagnosticRecommendation, ...] = ()
     coverage: tuple[DiagnosticCoverageItem, ...] = ()
+    download_latency_ms: Measurement[float] = field(default_factory=lambda: Measurement.unmeasured(unit="ms"))
+    upload_latency_ms: Measurement[float] = field(default_factory=lambda: Measurement.unmeasured(unit="ms"))
+    download_increase_ms: Measurement[float] = field(default_factory=lambda: Measurement.unmeasured(unit="ms"))
+    upload_increase_ms: Measurement[float] = field(default_factory=lambda: Measurement.unmeasured(unit="ms"))
 
 
 def empty_diagnostic_result(
@@ -434,8 +456,8 @@ def empty_diagnostic_result(
         jitter_ms=Measurement.unmeasured(unit="ms", reason=unavailable_reason),
         packet_loss_pct=Measurement.unmeasured(unit="%", reason=unavailable_reason),
         bufferbloat_grade=Measurement.unmeasured(reason=unavailable_reason),
-        bufferbloat_note="Not included in Quick profile"
-        if req.profile is DiagnosticProfile.QUICK
+        bufferbloat_note="Not included in this profile"
+        if req.profile in (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD)
         else ("Backend unavailable" if not backend_available else "Not measured"),
         checks=default_checks(backend_available=backend_available, reason=unavailable_reason),
         dns=DnsPerformance(

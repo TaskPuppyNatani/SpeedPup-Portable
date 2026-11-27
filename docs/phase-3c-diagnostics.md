@@ -1,5 +1,7 @@
 # Phase 3C.1 — Extended Connection Stability Measurements
 
+This document describes the Phase 3C.1 baseline. Full-profile behavior added in Phase 3C.2 is documented in `phase-3c2-bufferbloat.md`.
+
 ## Sampling Profiles
 
 - **Quick:** lightweight baseline snapshot using `3` immediate ICMP echo probes (`QUICK_PROBE_COUNT`) and `1` DNS lookup (`QUICK_DNS_COUNT`).

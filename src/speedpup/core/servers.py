@@ -97,6 +97,20 @@ def server_from_entry(entry: object) -> Server:
     )
 
 
+def server_to_entry(server: Server) -> dict[str, str]:
+    """Serialize a validated server into the entry shape accepted by server_from_entry."""
+
+    return {
+        "id": server.id,
+        "name": server.name,
+        "sponsorName": server.sponsor,
+        "server": server.base_url,
+        "pingURL": server.ping_url,
+        "dlURL": server.download_url,
+        "ulURL": server.upload_url,
+    }
+
+
 def parse_server_list(payload: object) -> list[Server]:
     """Return valid entries and reject a wholly malformed server response."""
 

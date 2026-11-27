@@ -6,6 +6,7 @@ import pytest
 
 from speedpup.core.diagnostics import (
     CheckStatus,
+    CoverageStatus,
     DiagnosticProfile,
     DiagnosticRequest,
     DiagnosticsCancelled,
@@ -34,13 +35,11 @@ def test_quick_calculates_mean_jitter_and_reports_unavailable_loss(monkeypatch):
     assert updates
 
 
-def test_cancel_and_unsupported_full_profile_are_explicit():
+def test_cancel_is_explicit():
     backend = NetworkDiagnosticsBackend()
     cancelled = Event(); cancelled.set()
     with pytest.raises(DiagnosticsCancelled):
         backend.run_diagnostics(DiagnosticRequest(), cancel_event=cancelled)
-    with pytest.raises(DiagnosticsError):
-        backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.FULL))
 
 
 def test_no_icmp_reply_is_not_reported_as_internet_failure(monkeypatch):
@@ -239,7 +238,7 @@ def test_gateway_discovery_uses_cross_platform_routes_and_reports_unsupported_ho
     assert 'not supported' in (gw_unavail.detail or '').lower()
 
 
-def _make_fake_backend(monkeypatch, probe_outcomes, *, probe_durations=None, dns_value=16.0):
+def _make_fake_backend(monkeypatch, probe_outcomes, *, probe_durations=None, dns_value=16.0, full_load_reason=None):
     from speedpup.core import diagnostics_backend as module
 
     clock_state = {'now': 100.0}
@@ -267,6 +266,14 @@ def _make_fake_backend(monkeypatch, probe_outcomes, *, probe_durations=None, dns
     monkeypatch.setattr(module, 'default_route_interface', lambda: 'wlo1')
     monkeypatch.setattr(module, 'PsutilProvider', lambda: SimpleNamespace(discover_interfaces=lambda: ()))
     monkeypatch.setattr(module, '_system_dns', lambda *a: (dns_value, None))
+    if full_load_reason is not None:
+        # In-process fixture for the FULL load stages only; no live network work happens.
+        monkeypatch.setattr(
+            module, 'run_load_stage',
+            lambda *_args, **_kwargs: SimpleNamespace(
+                started=None, finished=None, samples=[], attempted=0, adequate=False,
+                reason=full_load_reason),
+        )
     backend = NetworkDiagnosticsBackend(clock=fake_clock, waiter=fake_wait)
     return backend, probe_starts, clock_state
 
@@ -393,6 +400,129 @@ def test_standard_elevated_variation_emits_stability_warning(monkeypatch):
     assert 'variation' in result.recommendations[0].text.lower()
     assert '19.0s' in result.recommendations[0].text
     assert '15.0–95.0 ms' in result.recommendations[0].text
+
+
+def test_full_run_keeps_duration_qualified_stability_recommendations(monkeypatch):
+    # D1 regression: FULL samples the same Standard stability window as STANDARD, so it must
+    # produce the duration-qualified loss wording, the elevated-latency-variation warning and
+    # the unclassified-probe INFO note — identical to the same data run under STANDARD.
+    def build_outcomes():
+        outcomes = []
+        for idx in range(20):
+            if idx % 2 == 0:
+                outcomes.append(PingSample(float(10 + (idx // 2) * 8)))  # replies 10..82 ms
+            else:
+                outcomes.append(PingSample(None, timed_out=True))        # 10 timeouts
+        return outcomes
+
+    recovery = [PingSample(21.0)] * 3
+
+    standard_backend, _, _ = _make_fake_backend(monkeypatch, build_outcomes())
+    standard = standard_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.STANDARD))
+
+    full_backend, _, _ = _make_fake_backend(
+        monkeypatch, build_outcomes() + recovery, full_load_reason='fixture: no load in test')
+    full = full_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.FULL))
+
+    # Duration-qualified intermittent-loss wording (not the Quick "Measured X%" form)
+    loss_recs = [rec for rec in full.recommendations if 'packet loss' in rec.text.lower()]
+    assert len(loss_recs) == 1
+    assert loss_recs[0].severity is RecommendationSeverity.WARNING
+    assert loss_recs[0].text == (
+        'Intermittent ICMP packet loss detected over 19.0s '
+        '(10/20 probes, 50.0%; may reflect instability, congestion, or ICMP rate limiting).'
+    )
+    assert 'Measured 50.0% ICMP packet loss' not in full.recommendations[0].text
+
+    # Elevated latency variation recommendation is present for FULL (was dropped before the fix)
+    variation = [rec for rec in full.recommendations if 'variation' in rec.text.lower()]
+    assert len(variation) == 1
+    assert variation[0].severity is RecommendationSeverity.WARNING
+    assert 'over 19.0s' in variation[0].text
+    assert 'range 10.0–82.0 ms' in variation[0].text
+
+    # Standard-window wording for the unmeasured note (longer-term stability clause present)
+    notes = [rec for rec in full.recommendations if 'Not measured in this run' in rec.text]
+    assert len(notes) == 1
+    assert 'longer-term stability' in notes[0].text
+
+    # Identical recommendation text under STANDARD and FULL for the same data
+    assert [rec.text for rec in full.recommendations] == [rec.text for rec in standard.recommendations]
+    assert [rec.severity for rec in full.recommendations] == [rec.severity for rec in standard.recommendations]
+
+
+def test_full_run_keeps_unclassified_probe_note_and_quick_wording_unchanged(monkeypatch):
+    # D1 regression, unclassified-probe branch: FULL keeps the INFO note and Standard wording.
+    outcomes = [PingSample(12.0)] * 19 + [PingSample(None, unavailable_reason='ping permission denied')]
+
+    standard_backend, _, _ = _make_fake_backend(monkeypatch, list(outcomes))
+    standard = standard_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.STANDARD))
+
+    full_backend, _, _ = _make_fake_backend(
+        monkeypatch, outcomes + [PingSample(21.0)] * 3, full_load_reason='fixture: no load in test')
+    full = full_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.FULL))
+
+    unclassified = [rec for rec in full.recommendations if 'unavailable or unclassified' in rec.text]
+    assert len(unclassified) == 1
+    assert unclassified[0].severity is RecommendationSeverity.INFO
+    assert unclassified[0].text == (
+        '1 of 20 ICMP probes were unavailable or unclassified over 19.0s; '
+        'packet loss could not be determined reliably.'
+    )
+    notes = [rec for rec in full.recommendations if 'Not measured in this run' in rec.text]
+    assert len(notes) == 1 and 'longer-term stability' in notes[0].text
+    assert [rec.text for rec in full.recommendations] == [rec.text for rec in standard.recommendations]
+
+    # Quick behavior must be unchanged: no duration-qualified wording, no unclassified note.
+    quick_backend, _, _ = _make_fake_backend(
+        monkeypatch, [PingSample(12.0), PingSample(14.0), PingSample(None, unavailable_reason='denied')])
+    quick = quick_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.QUICK))
+    assert not any('over' in rec.text and 's (' in rec.text for rec in quick.recommendations)
+    assert not any('unavailable or unclassified' in rec.text for rec in quick.recommendations)
+    notes = [rec for rec in quick.recommendations if 'Not measured in this run' in rec.text]
+    assert len(notes) == 1 and 'longer-term stability' not in notes[0].text
+
+
+def test_bufferbloat_coverage_flags_are_consistent_across_profiles(monkeypatch):
+    # D5 regression: the coverage row and its reason must agree for every profile.
+    outcomes = [PingSample(20.0)] * 20
+
+    quick_backend, _, _ = _make_fake_backend(monkeypatch, list(outcomes))
+    quick = quick_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.QUICK))
+    item = next(c for c in quick.coverage if c.id == 'bufferbloat')
+    assert item.included_in_profile is False
+    assert item.status is CoverageStatus.SKIPPED
+    assert item.reason == 'Not included in this profile'
+
+    standard_backend, _, _ = _make_fake_backend(monkeypatch, list(outcomes))
+    standard = standard_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.STANDARD))
+    item = next(c for c in standard.coverage if c.id == 'bufferbloat')
+    # Standard does not attempt load: not-included/skipped, consistent with its reason.
+    assert item.included_in_profile is False
+    assert item.status is CoverageStatus.SKIPPED
+    assert item.reason == 'Not included in this profile'
+
+    full_backend, _, _ = _make_fake_backend(
+        monkeypatch, outcomes + [PingSample(21.0)] * 3, full_load_reason='fixture: no load in test')
+    full = full_backend.run_diagnostics(DiagnosticRequest(profile=DiagnosticProfile.FULL))
+    item = next(c for c in full.coverage if c.id == 'bufferbloat')
+    # FULL attempts load; an unmeasured grade stays included/UNAVAILABLE with the load qualification note.
+    assert item.included_in_profile is True
+    assert item.status is CoverageStatus.UNAVAILABLE
+    assert item.reason is not None and 'Grade unavailable' in item.reason
+    assert 'Not included in this profile' not in item.reason
+
+    # No completed run may pair included_in_profile=True with a "not included" reason, or
+    # included_in_profile=False with UNAVAILABLE.
+    for result in (quick, standard, full):
+        for entry in result.coverage:
+            if entry.status is CoverageStatus.SKIPPED:
+                assert entry.included_in_profile is False
+                assert 'not included' in (entry.reason or '').lower()
+            elif entry.included_in_profile is False:
+                assert entry.status is CoverageStatus.SKIPPED
+            else:
+                assert 'Not included in this profile' not in (entry.reason or '')
 
 
 def test_standard_cancellation_aborts_inter_probe_wait_promptly(monkeypatch):

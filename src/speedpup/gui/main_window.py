@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from speedpup import __version__
 from speedpup.core.diagnostics import (
+    DiagnosticProfile,
     DiagnosticRequest,
     DiagnosticsBackend,
     UnavailableDiagnosticsBackend,
@@ -359,6 +361,22 @@ class MainWindow(QMainWindow):
         if self._worker is not None or self._diagnostics_worker is not None:
             self.diagnostics_view.apply_error("A network test is already running.")
             return
+        if _request.profile is DiagnosticProfile.FULL:
+            answer = QMessageBox.question(
+                self, "Run Full diagnostics?",
+                "Full diagnostics typically take about 1–3 minutes. They generate intensive download and upload traffic, "
+                "which can interrupt other users and count against a data allowance. "
+                f"The { _request.load_budget.value.title() } budget allows up to {_request.load_budget.mib} MiB "
+                f"in each direction ({_request.load_budget.mib * 2} MiB total), plus server discovery and protocol overhead. "
+                "The test may use less. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            if self._close_when_idle or self._is_busy():
+                self.diagnostics_view.apply_error("A network test is already running or the window is closing.")
+                return
         worker = DiagnosticsWorker(self._diagnostics_backend, _request, self)
         self._diagnostics_worker = worker
         self.diagnostics_view.apply_running_state(_request)

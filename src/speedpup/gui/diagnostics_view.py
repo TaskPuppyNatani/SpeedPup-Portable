@@ -33,6 +33,7 @@ from speedpup.core.diagnostics import (
     DEFAULT_TARGET_OPTIONS,
     DiagnosticCheck,
     DiagnosticCoverageItem,
+    DiagnosticLoadBudget,
     DiagnosticProfile,
     DiagnosticProgress,
     DiagnosticRecommendation,
@@ -296,6 +297,20 @@ class DiagnosticsView(QScrollArea):
         selectors_row.addWidget(self.resolver_combo, 2)
 
         layout.addLayout(selectors_row)
+
+        budget_row = QHBoxLayout()
+        self.budget_label = _label("Full load budget per direction:", bold=True)
+        self.budget_combo = QComboBox()
+        self.budget_combo.setObjectName("diagnosticsLoadBudgetCombo")
+        for budget in DiagnosticLoadBudget:
+            self.budget_combo.addItem(f'{budget.value.title()} ({budget.mib} MiB)', budget.value)
+        self.budget_combo.setCurrentIndex(1)
+        self.budget_label.hide()
+        self.budget_combo.hide()
+        budget_row.addWidget(self.budget_label)
+        budget_row.addWidget(self.budget_combo)
+        budget_row.addStretch(1)
+        layout.addLayout(budget_row)
 
         # Row 2: Action buttons + Last run timestamp
         actions_row = QHBoxLayout()
@@ -570,7 +585,9 @@ class DiagnosticsView(QScrollArea):
         about_layout.addWidget(
             _label(
                 "Diagnostics are on-demand checks that actively test your connection "
-                "(latency, jitter, packet loss, and DNS). Bufferbloat testing is deferred to Phase 3C. "
+                "(latency, jitter, packet loss, and DNS). The Full profile also estimates "
+                "bufferbloat from latency under generated load; it is a qualified estimate, "
+                "not proof that your link saturates. "
                 "They are different from passive live monitoring, which continuously observes "
                 "traffic in real time without running tests.",
                 size=9,
@@ -632,6 +649,7 @@ class DiagnosticsView(QScrollArea):
             target=str(target) if target is not None else None,
             profile=self.selected_profile(),
             resolver=str(resolver) if resolver is not None else None,
+            load_budget=DiagnosticLoadBudget(self.budget_combo.currentData()),
         )
 
     def set_backend_availability(self, available: bool, reason: str | None = None) -> None:
@@ -788,6 +806,7 @@ class DiagnosticsView(QScrollArea):
         self._has_result = False
         self.target_combo.setCurrentIndex(0)
         self.profile_combo.setCurrentIndex(1)  # Standard
+        self.budget_combo.setCurrentIndex(1)
         self.resolver_combo.setCurrentIndex(0)
         self.last_run_label.setText("◷  Last run: Never")
         self._apply_idle_or_unavailable_state()
@@ -812,6 +831,8 @@ class DiagnosticsView(QScrollArea):
 
     def _on_profile_changed(self, _index: int) -> None:
         profile = self.selected_profile()
+        self.budget_label.setVisible(profile is DiagnosticProfile.FULL)
+        self.budget_combo.setVisible(profile is DiagnosticProfile.FULL)
         if not self._running and not self._has_result:
             self._render_coverage(
                 default_coverage_for_profile(
@@ -826,6 +847,7 @@ class DiagnosticsView(QScrollArea):
     def _set_controls_for_running(self, running: bool) -> None:
         self.target_combo.setEnabled(not running)
         self.profile_combo.setEnabled(not running)
+        self.budget_combo.setEnabled(not running)
         self.resolver_combo.setEnabled(not running)
         self.reset_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
@@ -885,9 +907,11 @@ class DiagnosticsView(QScrollArea):
 
     def _update_unmeasured_bufferbloat_note(self, profile: DiagnosticProfile) -> None:
         if profile is DiagnosticProfile.QUICK:
-            self.bufferbloat_note_label.setText("Not included in Quick profile")
+            self.bufferbloat_note_label.setText("Not included in this profile")
         elif not self._backend_available:
             self.bufferbloat_note_label.setText("Backend unavailable")
+        elif profile is DiagnosticProfile.STANDARD:
+            self.bufferbloat_note_label.setText("Not included in this profile")
         else:
             self.bufferbloat_note_label.setText("Not measured")
 
@@ -913,6 +937,12 @@ class DiagnosticsView(QScrollArea):
         self._render_connection(ConnectionDetails())
 
     def _render_metric_cards(self, result: DiagnosticResult) -> None:
+        def load_text() -> str:
+            def fmt(value):
+                return f'{value.value:.1f} ms' if value.available else 'unavailable'
+            return (f'Baseline: {fmt(result.latency_ms)} · Download: {fmt(result.download_latency_ms)} '
+                    f'(+{fmt(result.download_increase_ms)}) · Upload: {fmt(result.upload_latency_ms)} '
+                    f'(+{fmt(result.upload_increase_ms)})\n{result.bufferbloat_note or ""}')
         self.latency_value_label.setText(_format_float_measurement(result.latency_ms, decimals=1))
         self.latency_value_label.setToolTip(result.latency_ms.reason or "")
         self.latency_sparkline.set_values(
@@ -938,16 +968,18 @@ class DiagnosticsView(QScrollArea):
         if result.bufferbloat_grade.available and result.bufferbloat_grade.value is not None:
             grade = result.bufferbloat_grade.value
             grade_color = _grade_color(grade)
+            grade_label = 'Estimated grade' if result.request.profile is DiagnosticProfile.FULL else 'Grade'
             self.bufferbloat_value_label.setText(
-                f'Grade <span style="color:{grade_color};">{grade.value}</span>'
+                f'{grade_label} <span style="color:{grade_color};">{grade.value}</span>'
             )
             self.bufferbloat_value_label.setToolTip("")
-            self.bufferbloat_note_label.setText(result.bufferbloat_note or "")
+            self.bufferbloat_note_label.setText(load_text() if result.request.profile is DiagnosticProfile.FULL else result.bufferbloat_note or "")
         else:
             self.bufferbloat_value_label.setText("—")
             self.bufferbloat_value_label.setStyleSheet(f"font-size: 17pt; font-weight: 700; color: {TEXT};")
             self.bufferbloat_value_label.setToolTip(result.bufferbloat_grade.reason or "")
             self.bufferbloat_note_label.setText(
+                load_text() if result.request.profile is DiagnosticProfile.FULL else
                 result.bufferbloat_note or result.bufferbloat_grade.reason or "Unavailable"
             )
 

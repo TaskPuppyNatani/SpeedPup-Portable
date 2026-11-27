@@ -116,10 +116,33 @@ def test_profile_coverage_and_empty_result_defaults() -> None:
     quick_by_id = {item.id: item for item in quick}
     assert quick_by_id["bufferbloat"].included_in_profile is False
     assert quick_by_id["bufferbloat"].status is CoverageStatus.SKIPPED
+    assert quick_by_id["bufferbloat"].reason == "Not included in this profile"
     assert quick_by_id["latency"].status is CoverageStatus.PLANNED
 
+    # D5: Standard does not attempt load, so its bufferbloat row is consistent with
+    # its reason: not-included/skipped rather than included-but-unavailable.
+    standard = default_coverage_for_profile(DiagnosticProfile.STANDARD, backend_available=True)
+    standard_by_id = {item.id: item for item in standard}
+    assert standard_by_id["bufferbloat"].included_in_profile is False
+    assert standard_by_id["bufferbloat"].status is CoverageStatus.SKIPPED
+    assert standard_by_id["bufferbloat"].reason == "Not included in this profile"
+    assert all(
+        item.status is CoverageStatus.PLANNED
+        for item in standard if item.id != "bufferbloat"
+    )
+
+    full = default_coverage_for_profile(DiagnosticProfile.FULL, backend_available=True)
+    full_by_id = {item.id: item for item in full}
+    assert full_by_id["bufferbloat"].included_in_profile is True
+    assert full_by_id["bufferbloat"].status is CoverageStatus.PLANNED
+    assert full_by_id["bufferbloat"].reason is None
+
     standard_unavail = default_coverage_for_profile(DiagnosticProfile.STANDARD, backend_available=False)
-    assert all(item.status is CoverageStatus.UNAVAILABLE for item in standard_unavail)
+    # Bufferbloat stays not-included even when the backend is unavailable; every other row is unavailable.
+    assert all(
+        item.status is (CoverageStatus.SKIPPED if item.id == "bufferbloat" else CoverageStatus.UNAVAILABLE)
+        for item in standard_unavail
+    )
 
     empty = empty_diagnostic_result(DiagnosticRequest(profile=DiagnosticProfile.FULL))
     assert empty.state is DiagnosticRunState.UNAVAILABLE
@@ -150,7 +173,10 @@ def test_main_window_integrates_diagnostics_page_honestly() -> None:
     assert all("Unavailable" in badge.text() for _, _, badge in view._check_rows.values())
     assert view.dns_resolver_value.text() == "Unavailable"
     assert view.conn_interface_value.text() == "Unavailable"
-    assert all(hint.text() == "Unavailable" for _, _, hint in view._coverage_rows.values())
+    assert all(
+        hint.text() == ("Skipped" if row_id == "bufferbloat" else "Unavailable")
+        for row_id, (_, _, hint) in view._coverage_rows.items()
+    )
 
     # Profile & resolver controls update request and reflect Quick coverage honestly
     view.profile_combo.setCurrentIndex(0)  # Quick
@@ -159,6 +185,7 @@ def test_main_window_integrates_diagnostics_page_honestly() -> None:
 
     view.profile_combo.setCurrentIndex(2)  # Full
     assert view.current_request().profile is DiagnosticProfile.FULL
+    # D5: with the backend unavailable, FULL attempts bufferbloat but cannot measure it.
     assert view._coverage_rows["bufferbloat"][2].text() == "Unavailable"
 
     view.resolver_combo.setCurrentIndex(1)  # Cloudflare (1.1.1.1)

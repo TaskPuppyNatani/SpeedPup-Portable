@@ -23,6 +23,8 @@ from .diagnostics import (
     Measurement, RecommendationSeverity,
 )
 from .diagnostic_ping import ping_once
+from .bufferbloat import grade_increase, mean_if_covered, run_load_stage
+from .diagnostic_trace import start_trace, finish_trace, record as trace_record, enabled as trace_enabled
 from .monitor import PsutilProvider
 from .routes import (
     default_ipv4_gateway,
@@ -194,11 +196,14 @@ def _build_recommendations(
     readings: Sequence[float] = (),
     mean_jitter_ms: float | None = None,
 ) -> tuple[DiagnosticRecommendation, ...]:
-    measured_labels = [item.label for item in coverage if item.status is CoverageStatus.MEASURED]
+    measured_labels = [item.label for item in coverage if item.status is CoverageStatus.MEASURED and item.id != 'bufferbloat']
     unmeasured_labels = [item.label for item in coverage if item.status is not CoverageStatus.MEASURED]
     unmeasured_ids = {item.id for item in coverage if item.status is not CoverageStatus.MEASURED}
 
-    is_standard = profile is DiagnosticProfile.STANDARD and sampling_seconds is not None
+    # FULL runs the same Standard stability window as STANDARD, so duration-qualified
+    # wording applies to both; only Quick lacks it. Callers pass sampling_seconds=None
+    # for profiles without a sampled window.
+    is_standard = profile in (DiagnosticProfile.STANDARD, DiagnosticProfile.FULL) and sampling_seconds is not None
     issues: list[DiagnosticRecommendation] = []
     local_check = next((check for check in checks if check.id == 'local_adapter'), None)
     if local_check is not None and local_check.status is CheckStatus.WARNING:
@@ -538,9 +543,26 @@ class NetworkDiagnosticsBackend:
         return point, False, (probe.unavailable_reason or 'No ICMP response')
 
     def run_diagnostics(self, request, *, cancel_event: Event | None = None, progress=None):
+        trace, token = start_trace() if request.profile is DiagnosticProfile.FULL else (None, None)
+        try:
+            if trace:
+                trace_record('run_start', profile='full', budget_mib=request.load_budget.mib)
+            result = self._run_diagnostics(request, cancel_event=cancel_event, progress=progress)
+            trace_record('run_end', outcome='completed', grade_available=result.bufferbloat_grade.available)
+            return result
+        except DiagnosticsCancelled:
+            trace_record('run_end', outcome='cancelled')
+            raise
+        except Exception as exc:
+            trace_record('run_end', outcome='failed', error_type=type(exc).__name__)
+            raise
+        finally:
+            finish_trace(trace, token)
+
+    def _run_diagnostics(self, request, *, cancel_event: Event | None = None, progress=None):
         _cancel(cancel_event)
-        if request.profile not in (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD):
-            raise DiagnosticsError('Full diagnostics are not implemented; choose Quick or Standard')
+        if request.profile not in (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD, DiagnosticProfile.FULL):
+            raise DiagnosticsError('Unknown diagnostics profile')
         target = request.target or '1.1.1.1'
         try:
             target = str(ipaddress.ip_address(target))
@@ -548,7 +570,8 @@ class NetworkDiagnosticsBackend:
                 ipaddress.ip_address(request.resolver)
         except ValueError as exc:
             raise DiagnosticsError('Target and resolver must be numeric IP addresses') from exc
-        is_standard = request.profile == DiagnosticProfile.STANDARD
+        is_full = request.profile == DiagnosticProfile.FULL
+        is_standard = request.profile in (DiagnosticProfile.STANDARD, DiagnosticProfile.FULL)
         dns_count = STANDARD_DNS_COUNT if is_standard else QUICK_DNS_COUNT
         started_at = datetime.now(timezone.utc)
         start = self._clock()
@@ -557,6 +580,15 @@ class NetworkDiagnosticsBackend:
 
         def report(stage, message, fraction, sample=None):
             nonlocal last_fraction
+            if is_full:
+                if stage in (DiagnosticStage.CHECKS, DiagnosticStage.IDLE, DiagnosticStage.DNS):
+                    fraction *= .35
+                elif stage is DiagnosticStage.DOWNLOAD_LOAD:
+                    fraction = .4
+                elif stage is DiagnosticStage.UPLOAD_LOAD:
+                    fraction = .65
+                elif stage is DiagnosticStage.RECOVERY:
+                    fraction = .9
             last_fraction = max(last_fraction, _clamp_fraction(fraction))
             if progress:
                 progress(
@@ -658,7 +690,103 @@ class NetworkDiagnosticsBackend:
             if value is not None:
                 dns_readings.append(value)
         checks.append(DiagnosticCheck('dns_resolution', 'DNS resolution', CheckStatus.PASSED if dns_readings else CheckStatus.WARNING, 'Successful lookups' if dns_readings else 'Lookup did not complete successfully'))
-        checks.append(DiagnosticCheck('loaded_upload_responsiveness', 'Loaded upload responsiveness', CheckStatus.UNAVAILABLE, 'Bufferbloat is deferred to Phase 3C'))
+        download_mean = upload_mean = download_increase = upload_increase = None
+        grade = None
+        # Standard does not attempt load, so its bufferbloat row reads as not-included/skipped.
+        # Quick and Standard are excluded by profile; FULL attempts load and carries the load qualification note.
+        load_note = 'Not included in this profile' if request.profile is DiagnosticProfile.QUICK or request.profile is DiagnosticProfile.STANDARD else ''
+        if is_full:
+            load_results = []
+            reused_server = None
+            samples.append(LatencyLoadSample(max(0.0, self._clock() - start), DiagnosticStage.IDLE))
+            for direction, stage in (('download', DiagnosticStage.DOWNLOAD_LOAD), ('upload', DiagnosticStage.UPLOAD_LOAD)):
+                _cancel(cancel_event)
+                report(stage, f'Preparing {direction} load', .5)
+                if reused_server is not None:
+                    load = run_load_stage(direction, target, start, cancel_event, report,
+                                          request.load_budget.mib, server=reused_server)
+                else:
+                    load = run_load_stage(direction, target, start, cancel_event, report,
+                                          request.load_budget.mib)
+                load_results.append(load)
+                if reused_server is None:
+                    reused_server = getattr(load, 'server', None)
+                if load.started is not None:
+                    samples.append(LatencyLoadSample(max(0.0, load.started - start), stage))
+                samples.extend(load.samples)
+                if load.finished is not None:
+                    samples.append(LatencyLoadSample(max(0.0, load.finished - start), stage))
+                    samples.append(LatencyLoadSample(max(0.0, load.finished - start), DiagnosticStage.IDLE))
+                for point in load.samples:
+                    report(stage, f'{direction.capitalize()} latency sample', .5, point)
+            samples.append(LatencyLoadSample(max(0.0, self._clock() - start), DiagnosticStage.RECOVERY))
+            for index in range(3):
+                _cancel(cancel_event)
+                if index:
+                    self._waiter(1.0, cancel_event)
+                report(DiagnosticStage.RECOVERY, f'Recovery sample {index + 1}/3', .9)
+                probe = ping_once(target, cancel_event)
+                point = LatencyLoadSample(max(0.0, self._clock() - start), DiagnosticStage.RECOVERY,
+                                          baseline_latency_ms=probe.latency_ms,
+                                          packet_loss_event=probe.timed_out,
+                                          timestamp=datetime.now().astimezone())
+                samples.append(point)
+                report(DiagnosticStage.RECOVERY, 'Recovery latency', .9, point)
+            baseline_mean = mean_if_covered(outcomes)
+            def covered_load_mean(load):
+                values = [sample.loaded_latency_ms for sample in load.samples]
+                values.extend([None] * max(0, load.attempted - len(values)))
+                return mean_if_covered(values)
+            download_mean = covered_load_mean(load_results[0])
+            upload_mean = covered_load_mean(load_results[1])
+            if trace_enabled():
+                baseline_success = sum(value is not None for value in outcomes)
+                baseline_failures = []
+                if baseline_success < 3:
+                    baseline_failures.append('baseline_valid_below_3')
+                if baseline_success * 4 < len(outcomes) * 3:
+                    baseline_failures.append('baseline_coverage_below_75_percent')
+                trace_record('baseline_coverage', attempted=len(outcomes), successful=baseline_success,
+                             eligible=baseline_success, failures=baseline_failures)
+                for name, load, mean in zip(('download', 'upload'), load_results, (download_mean, upload_mean)):
+                    valid = sum(sample.loaded_latency_ms is not None for sample in load.samples)
+                    failures = list(baseline_failures)
+                    if not load.adequate:
+                        failures.extend(load.failure_codes or ('load_inadequate',))
+                    if valid < 3:
+                        failures.append('loaded_valid_below_3')
+                    if valid * 4 < max(load.attempted, len(load.samples)) * 3:
+                        failures.append('loaded_coverage_below_75_percent')
+                    trace_record('grading_eligibility', direction=name, attempted=load.attempted,
+                                 successful=load.successful, eligible=valid,
+                                 load_adequate=load.adequate, failures=failures,
+                                 eligible_for_grade=load.adequate and mean is not None and baseline_mean is not None,
+                                 partial_worker_failure=bool(load.qualifications))
+            if baseline_mean is not None and download_mean is not None:
+                download_increase = max(0.0, download_mean - baseline_mean)
+            if baseline_mean is not None and upload_mean is not None:
+                upload_increase = max(0.0, upload_mean - baseline_mean)
+            if all(load.adequate for load in load_results) and download_increase is not None and upload_increase is not None:
+                grade = grade_increase(max(download_increase, upload_increase))
+                load_note = 'Estimated under observed load; saturation is not established, so this grade may understate bufferbloat.'
+                for name, load in zip(('Download', 'Upload'), load_results):
+                    for qualification in load.qualifications:
+                        load_note += f' {name}: {qualification}'
+            else:
+                reasons = []
+                if baseline_mean is None:
+                    reasons.append('Baseline: insufficient latency samples')
+                for name, load, mean in zip(('Download', 'Upload'), load_results, (download_mean, upload_mean)):
+                    reasons.append(f'{name}: {load.reason}')
+                    if mean is None:
+                        reasons.append(f'{name}: insufficient latency samples')
+                load_note = 'Grade unavailable. ' + '; '.join(reasons)
+        checks.append(DiagnosticCheck('loaded_upload_responsiveness', 'Loaded upload responsiveness',
+                                      (CheckStatus.WARNING if upload_increase > 30 else CheckStatus.PASSED)
+                                      if is_full and upload_increase is not None and load_results[1].adequate else CheckStatus.UNAVAILABLE,
+                                      (f'{upload_increase:.1f} ms additional latency; {load_results[1].reason}'
+                                       if is_full and upload_increase is not None else
+                                       load_results[1].reason if is_full else 'Not included in this profile')))
 
         jitter = _adjacent_jitter_deltas(outcomes)
         mean_jitter_ms = statistics.mean(jitter) if jitter else None
@@ -680,15 +808,16 @@ class NetworkDiagnosticsBackend:
             DiagnosticCoverageItem(
                 key,
                 label,
-                True,
-                CoverageStatus.UNAVAILABLE
-                if key == 'bufferbloat'
+                not (key == 'bufferbloat' and request.profile in (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD)),
+                CoverageStatus.SKIPPED if key == 'bufferbloat' and request.profile in (DiagnosticProfile.QUICK, DiagnosticProfile.STANDARD)
+                else CoverageStatus.UNAVAILABLE
+                if (key == 'bufferbloat' and grade is None)
                 or (key == 'packet_loss' and loss is None)
                 or (key == 'latency' and not readings)
                 or (key == 'jitter' and mean_jitter_ms is None)
                 or (key == 'dns' and not dns_readings)
                 else CoverageStatus.MEASURED,
-                'Deferred to Phase 3C' if key == 'bufferbloat' else None,
+                load_note if key == 'bufferbloat' and grade is None else None,
             )
             for key, label in CANONICAL_COVERAGE
         )
@@ -707,12 +836,17 @@ class NetworkDiagnosticsBackend:
             readings=readings,
             mean_jitter_ms=mean_jitter_ms,
         )
+        if is_full and grade is not None:
+            advice = ('Consider router smart queue management and repeat the test while the connection is otherwise idle.'
+                      if max(download_increase, upload_increase) > 30 else
+                      'Repeat under representative use; this short test cannot establish the access-link capacity.')
+            recs += (DiagnosticRecommendation(advice, RecommendationSeverity.INFO),)
         _cancel(cancel_event)
         report(DiagnosticStage.FINALIZING, 'Finalizing diagnostic results', 1.0)
         summary = (
+            'Full diagnostics completed; review load and coverage qualifications below.' if is_full else
             f'Standard stability diagnostics completed over {sampling_window:.1f}s; unavailable probes are identified below.'
-            if is_standard
-            else 'Diagnostics completed; unavailable probes are identified below.'
+            if is_standard else 'Diagnostics completed; unavailable probes are identified below.'
         )
         return DiagnosticResult(
             request=request,
@@ -723,12 +857,16 @@ class NetworkDiagnosticsBackend:
             latency_ms=latency,
             jitter_ms=jitter_result,
             packet_loss_pct=measured(loss, unit='%') if loss is not None else unavailable('ICMP loss cannot be established reliably', '%'),
-            bufferbloat_grade=unavailable('Deferred to Phase 3C'),
-            bufferbloat_note='Unavailable until Phase 3C',
+            download_latency_ms=measured(download_mean, unit='ms') if download_mean is not None else unavailable('Insufficient loaded samples', 'ms'),
+            upload_latency_ms=measured(upload_mean, unit='ms') if upload_mean is not None else unavailable('Insufficient loaded samples', 'ms'),
+            download_increase_ms=measured(download_increase, unit='ms') if download_increase is not None else unavailable('Insufficient baseline or loaded samples', 'ms'),
+            upload_increase_ms=measured(upload_increase, unit='ms') if upload_increase is not None else unavailable('Insufficient baseline or loaded samples', 'ms'),
+            bufferbloat_grade=measured(grade) if grade is not None else unavailable(load_note),
+            bufferbloat_note=load_note,
             latency_sparkline=tuple(readings),
             jitter_sparkline=tuple(jitter),
             packet_loss_sparkline=packet_loss_sparkline,
-            samples=tuple(samples) if readings else (),
+            samples=tuple(samples) if readings or is_full else (),
             checks=tuple(checks),
             dns=dns,
             connection=connection,

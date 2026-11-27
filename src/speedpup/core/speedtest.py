@@ -36,6 +36,7 @@ DOWNLOAD_WORKERS = 3
 UPLOAD_WORKERS = 3
 PROGRESS_INTERVAL_SECONDS = 0.25
 MAX_SERVER_PROBES = 8
+_connect_cancel = threading.local()
 
 
 class SpeedTestError(RuntimeError):
@@ -95,9 +96,12 @@ def _connection(url: str, timeout: float) -> http.client.HTTPConnection:
 
 def _public_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
     """Resolve once, then connect only to the validated public address."""
+    cancel_event = getattr(_connect_cancel, "event", None)
+    _check_cancel(cancel_event)
     host, port = address
     errors = []
     for family, kind, proto, _canonname, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        _check_cancel(cancel_event)
         ip = ipaddress.ip_address(sockaddr[0].split('%')[0])
         if not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
             continue
@@ -108,7 +112,14 @@ def _public_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_a
             if source_address:
                 sock.bind(source_address)
             sock.connect(sockaddr)
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    sock.close()
+                finally:
+                    raise TestCancelled("speed test cancelled")
             return sock
+        except TestCancelled:
+            raise
         except OSError as exc:
             errors.append(exc)
             sock.close()
@@ -223,6 +234,29 @@ class SpeedTestEngine:
             raise ValueError("samples must be positive")
         _check_cancel(cancel_event)
         connection = _connection(server.ping_url, self.timeout)
+        if cancel_event is not None:
+            original_create = connection._create_connection
+
+            def cancellable_create(
+                address,
+                timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+                source_address=None,
+            ):
+                _check_cancel(cancel_event)
+                previous = getattr(_connect_cancel, "event", None)
+                _connect_cancel.event = cancel_event
+                try:
+                    sock = original_create(address, timeout, source_address)
+                finally:
+                    _connect_cancel.event = previous
+                if cancel_event.is_set():
+                    try:
+                        sock.close()
+                    finally:
+                        raise TestCancelled("speed test cancelled")
+                return sock
+
+            connection._create_connection = cancellable_create
         timings: list[float] = []
         try:
             for _ in range(samples):
@@ -238,6 +272,7 @@ class SpeedTestEngine:
                         "Connection": "keep-alive",
                     },
                 )
+                _check_cancel(cancel_event)
                 response = connection.getresponse()
                 if not 200 <= response.status < 300:
                     response.read(4096)
@@ -269,57 +304,200 @@ class SpeedTestEngine:
         servers: list[Server],
         cancel_event: Event | None = None,
         progress: ProgressCallback | None = None,
+        *,
+        max_seconds: float | None = None,
+        settle_seconds: float | None = None,
     ) -> tuple[Server, float]:
-        """Pick the reachable server with the lowest HTTP latency sample."""
+        """Pick the reachable server with the lowest HTTP latency sample.
+
+        When ``max_seconds`` is provided, selection never waits past that budget
+        and returns the lowest-latency already-validated candidate if any
+        succeeded. When ``settle_seconds`` is provided, selection stops waiting
+        for slower candidates once a validated candidate is available and the
+        settle window elapses.
+        """
 
         _check_cancel(cancel_event)
         if not servers:
             raise SpeedTestError("no speed test servers are available")
+        if max_seconds is not None and max_seconds <= 0:
+            raise ValueError("max_seconds must be greater than zero")
+        if settle_seconds is not None and settle_seconds < 0:
+            raise ValueError("settle_seconds must be non-negative")
+
         started = time.monotonic()
+        hard_deadline = started + max_seconds if max_seconds is not None else None
+        stall_threshold = (
+            min(self.timeout, max_seconds / 2.0) if max_seconds is not None else None
+        )
+        next_stall_check = (
+            started + stall_threshold if stall_threshold is not None else None
+        )
+
+        cond = threading.Condition()
+        stop_event = Event()
+        total = len(servers)
+        server_iter = iter(servers)
         available: list[tuple[float, Server]] = []
+        first_valid_at: float | None = None
         failures = 0
-        with ThreadPoolExecutor(max_workers=min(MAX_SERVER_PROBES, len(servers))) as pool:
-            futures = {
-                pool.submit(
-                    self.probe_latency,
-                    server,
-                    samples=1,
-                    cancel_event=cancel_event,
-                ): server
-                for server in servers
-            }
-            complete = 0
-            try:
-                for future in as_completed(futures):
-                    _check_cancel(cancel_event)
-                    complete += 1
-                    server = futures[future]
+        completed = 0
+        dispatched = 0
+        cancelled_error = False
+
+        def worker() -> None:
+            nonlocal failures, completed, dispatched, first_valid_at, cancelled_error
+            while not stop_event.is_set():
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                with cond:
+                    if stop_event.is_set():
+                        return
                     try:
-                        available.append((future.result(), server))
-                    except TestCancelled:
-                        raise
-                    except Exception:
-                        failures += 1
-                    if progress is not None:
-                        progress(
-                            TestProgress(
-                                "server",
-                                f"Checking test servers ({complete}/{len(servers)})",
-                                0.0,
-                                time.monotonic() - started,
-                            )
+                        server = next(server_iter)
+                    except StopIteration:
+                        return
+                    dispatched += 1
+                try:
+                    latency = self.probe_latency(
+                        server,
+                        samples=1,
+                        cancel_event=stop_event,
+                    )
+                except TestCancelled:
+                    with cond:
+                        if not stop_event.is_set():
+                            cancelled_error = True
+                            stop_event.set()
+                            cond.notify_all()
+                    return
+                except Exception:
+                    with cond:
+                        if not stop_event.is_set():
+                            failures += 1
+                            completed += 1
+                            cond.notify_all()
+                    continue
+                now = time.monotonic()
+                with cond:
+                    if not stop_event.is_set():
+                        available.append((latency, server))
+                        if first_valid_at is None:
+                            first_valid_at = now
+                        completed += 1
+                        cond.notify_all()
+
+        # Use daemon workers instead of ThreadPoolExecutor so early return,
+        # deadline expiration, and cancellation never block on slow resolvers
+        # or hang child interpreter exit.
+        worker_count = min(MAX_SERVER_PROBES, total)
+        extra_spawned = 0
+
+        def spawn_workers(count: int) -> None:
+            for _ in range(count):
+                threading.Thread(target=worker, daemon=True).start()
+
+        spawn_workers(worker_count)
+
+        reported = 0
+        last_completed = 0
+        timed_out = False
+        try:
+            while True:
+                _check_cancel(cancel_event)
+                with cond:
+                    if cancelled_error:
+                        raise TestCancelled("speed test cancelled")
+                    current_completed = completed
+                    current_dispatched = dispatched
+                    have_valid = bool(available)
+                    valid_at = first_valid_at
+                if progress is not None and current_completed > reported:
+                    reported = current_completed
+                    progress(
+                        TestProgress(
+                            "server",
+                            f"Checking test servers ({reported}/{total})",
+                            0.0,
+                            time.monotonic() - started,
                         )
-            except TestCancelled:
-                for future in futures:
-                    future.cancel()
-                raise
+                    )
+                if current_completed >= total:
+                    break
+                now = time.monotonic()
+                if current_completed > last_completed:
+                    last_completed = current_completed
+                    if stall_threshold is not None:
+                        next_stall_check = now + stall_threshold
+                wait_until = hard_deadline
+                if have_valid and settle_seconds is not None and valid_at is not None:
+                    settle_deadline = valid_at + settle_seconds
+                    wait_until = (
+                        settle_deadline
+                        if wait_until is None
+                        else min(wait_until, settle_deadline)
+                    )
+                if wait_until is not None and now >= wait_until:
+                    timed_out = not have_valid
+                    break
+                if (
+                    not have_valid
+                    and next_stall_check is not None
+                    and stall_threshold is not None
+                    and extra_spawned < MAX_SERVER_PROBES
+                    and now >= next_stall_check
+                ):
+                    with cond:
+                        spawn_count = (
+                            min(MAX_SERVER_PROBES - extra_spawned, total - dispatched)
+                            if dispatched >= worker_count and dispatched < total
+                            else 0
+                        )
+                    if spawn_count > 0:
+                        spawn_workers(spawn_count)
+                        extra_spawned += spawn_count
+                    next_stall_check = now + stall_threshold
+                wake_at = wait_until
+                if (
+                    not have_valid
+                    and next_stall_check is not None
+                    and extra_spawned < MAX_SERVER_PROBES
+                    and current_dispatched < total
+                ):
+                    wake_at = (
+                        next_stall_check
+                        if wake_at is None
+                        else min(wake_at, next_stall_check)
+                    )
+                with cond:
+                    if completed != current_completed or cancelled_error:
+                        continue
+                    if wake_at is None:
+                        timeout = 0.05 if cancel_event is not None else None
+                    else:
+                        remaining = max(0.0, wake_at - time.monotonic())
+                        timeout = (
+                            min(0.05, remaining)
+                            if cancel_event is not None
+                            else remaining
+                        )
+                    cond.wait(timeout=timeout)
+        finally:
+            stop_event.set()
+
+        with cond:
+            best_candidates = list(available)
+            total_failures = failures
+            final_completed = completed
         _check_cancel(cancel_event)
-        if not available:
-            raise SpeedTestError(
-                f"No speed test server responded to HTTP latency checks ({failures} failed)"
-            )
-        latency, server = min(available, key=lambda result: result[0])
-        return server, latency
+        if best_candidates:
+            latency, server = min(best_candidates, key=lambda result: result[0])
+            return server, latency
+        if timed_out or (hard_deadline is not None and final_completed < total):
+            raise TimeoutError("Server selection exceeded its time allowance")
+        raise SpeedTestError(
+            f"No speed test server responded to HTTP latency checks ({total_failures} failed)"
+        )
 
     def run_test(
         self,
