@@ -507,6 +507,7 @@ from speedpup.core.models import Server
 from speedpup.core.speedtest import SpeedTestEngine
 
 direction = sys.argv[1]
+budget_bytes = int(sys.argv[2]) * 1024 * 1024
 valid = Server(
     '7',
     'Fixture Fast',
@@ -572,25 +573,37 @@ class Connection:
 load.SpeedTestEngine = FixtureEngine
 load._connection = Connection
 load.SELECTION_SETTLE_SECONDS = 0.1
-load.LOAD_SECONDS = 5.4
+load.LOAD_SECONDS = 5.8
 load.RAMP_INTERVAL = 0.05
 load.WORKERS = 2
 reused = load._read_server_from_stdin()
 if direction == 'upload':
     assert reused is not None and reused.id == '7'
-load.main(direction, 24 * 1024 * 1024, server=reused)
+load.main(direction, budget_bytes, server=reused)
 '''
     real_popen = subprocess.Popen
     spawned = []
 
     def spawn(command, **kwargs):
         direction = command[3]
-        child = real_popen([sys.executable, '-c', child_script, direction], **kwargs)
+        budget_mib = command[4]
+        child = real_popen([sys.executable, '-c', child_script, direction, budget_mib], **kwargs)
         spawned.append((direction, child))
         return child
 
+    def synthetic_ping(_target, cancel_event=None):
+        # Advance across at least one monotonic clock tick so before < after
+        # even on coarse timers (e.g. Windows Python 3.11 GetTickCount64 ~15.6 ms),
+        # preventing a zero-duration mock probe from sharing an activity timestamp.
+        started_tick = time.monotonic()
+        while time.monotonic() <= started_tick:
+            if cancel_event is not None and cancel_event.is_set():
+                raise DiagnosticsCancelled('Diagnostics cancelled')
+            time.sleep(0.005)
+        return PingSample(25.0)
+
     monkeypatch.setattr(bufferbloat.subprocess, 'Popen', spawn)
-    monkeypatch.setattr(bufferbloat, 'ping_once', lambda *_: PingSample(25.0))
+    monkeypatch.setattr(bufferbloat, 'ping_once', synthetic_ping)
 
     result = NetworkDiagnosticsBackend(waiter=lambda *_: None).run_diagnostics(
         DiagnosticRequest(profile=DiagnosticProfile.FULL)
