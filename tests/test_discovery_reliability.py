@@ -12,6 +12,7 @@ import io
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -204,10 +205,12 @@ def test_bounded_selection_preserves_public_ip_validation_and_cancels_late_dns_c
     valid_server = _make_server(3, host='valid.example.test')
     slow_dns_server = _make_server(4, host='slowdns.example.test')
 
+    slow_dns_entered = Event()
     slow_dns_release = Event()
     slow_dns_done = Event()
     connected_ips = []
     connected_lock = threading.Lock()
+    worker_threads: list[threading.Thread] = []
 
     def fake_getaddrinfo(host, port, **kwargs):
         if host == 'private.example.test':
@@ -215,8 +218,10 @@ def test_bounded_selection_preserves_public_ip_validation_and_cancels_late_dns_c
         if host == 'badbody.example.test':
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('93.184.216.34', port))]
         if host == 'valid.example.test':
+            slow_dns_entered.wait(2.0)
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('93.184.216.35', port))]
         if host == 'slowdns.example.test':
+            slow_dns_entered.set()
             slow_dns_release.wait(2.0)
             slow_dns_done.set()
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('93.184.216.36', port))]
@@ -242,6 +247,7 @@ def test_bounded_selection_preserves_public_ip_validation_and_cancels_late_dns_c
 
     class FakeSSLContext:
         check_hostname = True
+        verify_mode = ssl.CERT_REQUIRED
 
         def wrap_socket(self, sock, server_hostname=None):
             return sock
@@ -263,24 +269,38 @@ def test_bounded_selection_preserves_public_ip_validation_and_cancels_late_dns_c
             return FakeResponse(b'not empty')
         return FakeResponse(b'')
 
+    class TrackedEngine(SpeedTestEngine):
+        def probe_latency(self, server, *, samples=5, cancel_event=None):
+            with connected_lock:
+                worker_threads.append(threading.current_thread())
+            return super().probe_latency(server, samples=samples, cancel_event=cancel_event)
+
     monkeypatch.setattr(socket, 'getaddrinfo', fake_getaddrinfo)
     monkeypatch.setattr(socket, 'socket', lambda *_args: FakeSocket())
     monkeypatch.setattr('speedpup.core.speedtest.ssl.create_default_context', lambda: FakeSSLContext())
     monkeypatch.setattr(http.client.HTTPConnection, 'request', fake_request)
     monkeypatch.setattr(http.client.HTTPConnection, 'getresponse', fake_getresponse)
 
-    engine = SpeedTestEngine(timeout=1.0)
-    selected, _ = engine.select_best_server(
-        [private_server, bad_body_server, valid_server, slow_dns_server],
-        max_seconds=2.0,
-        settle_seconds=0.1,
-    )
-    assert selected == valid_server
-    # Release the stalled DNS lookup after selection has ended and verify no
-    # late socket connect is attempted for the abandoned candidate.
-    slow_dns_release.set()
-    assert slow_dns_done.wait(1.0)
-    time.sleep(0.05)
+    engine = TrackedEngine(timeout=1.0)
+    try:
+        selected, _ = engine.select_best_server(
+            [private_server, bad_body_server, valid_server, slow_dns_server],
+            max_seconds=2.0,
+            settle_seconds=0.1,
+        )
+        assert selected == valid_server
+        assert slow_dns_entered.is_set()
+        # Release the stalled DNS lookup after selection has ended and verify no
+        # late socket connect is attempted for the abandoned candidate.
+        slow_dns_release.set()
+        assert slow_dns_done.wait(1.0)
+    finally:
+        slow_dns_release.set()
+        with connected_lock:
+            threads_to_join = list(worker_threads)
+        for thread in threads_to_join:
+            thread.join(timeout=2.0)
+    assert all(not thread.is_alive() for thread in threads_to_join)
     with connected_lock:
         assert '127.0.0.1' not in connected_ips
         assert '93.184.216.36' not in connected_ips
@@ -315,46 +335,90 @@ def test_bounded_selection_distinguishes_all_failed_from_timeout():
 
 def test_select_best_server_cancellation_aborts_promptly_and_blocks_late_connect(monkeypatch):
     servers = [_make_server(i, host=f'cancel-{i}.example.test') for i in range(3)]
+    state_lock = threading.Lock()
+    entered_hosts: set[str] = set()
+    completed_dns: set[str] = set()
+    all_dns_entered = Event()
+    all_dns_done = Event()
     dns_release = Event()
-    dns_done = Event()
+    cancel = Event()
+    cancel_triggered_at: list[float] = []
     connected = []
+    worker_threads: list[threading.Thread] = []
 
     def stalled_getaddrinfo(host, port, **kwargs):
-        dns_release.wait(2.0)
-        dns_done.set()
+        with state_lock:
+            entered_hosts.add(host)
+            if len(entered_hosts) == len(servers):
+                all_dns_entered.set()
+        dns_release.wait(5.0)
+        with state_lock:
+            completed_dns.add(host)
+            if len(completed_dns) == len(servers):
+                all_dns_done.set()
         return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('93.184.216.40', port))]
 
     class FakeSocket:
         def settimeout(self, _timeout):
             pass
 
+        def setsockopt(self, *_args):
+            pass
+
         def connect(self, sockaddr):
-            connected.append(sockaddr)
+            with state_lock:
+                connected.append(sockaddr)
 
         def close(self):
             pass
 
+    class FakeSSLContext:
+        check_hostname = True
+        verify_mode = ssl.CERT_REQUIRED
+
+        def wrap_socket(self, sock, server_hostname=None):
+            return sock
+
+    class TrackedEngine(SpeedTestEngine):
+        def probe_latency(self, server, *, samples=5, cancel_event=None):
+            with state_lock:
+                worker_threads.append(threading.current_thread())
+            return super().probe_latency(server, samples=samples, cancel_event=cancel_event)
+
     monkeypatch.setattr(socket, 'getaddrinfo', stalled_getaddrinfo)
     monkeypatch.setattr(socket, 'socket', lambda *_args: FakeSocket())
+    monkeypatch.setattr('speedpup.core.speedtest.ssl.create_default_context', lambda: FakeSSLContext())
 
-    cancel = Event()
-    timer = Timer(0.1, cancel.set)
-    timer.start()
-    started = time.monotonic()
+    def trigger_cancel_when_blocked():
+        if all_dns_entered.wait(4.0):
+            cancel_triggered_at.append(time.monotonic())
+            cancel.set()
+
+    trigger = threading.Thread(target=trigger_cancel_when_blocked, daemon=True)
+    trigger.start()
     try:
         with pytest.raises(CancelledError):
-            SpeedTestEngine(timeout=1.0).select_best_server(
+            TrackedEngine(timeout=1.0).select_best_server(
                 servers,
                 cancel_event=cancel,
                 max_seconds=5.0,
                 settle_seconds=0.2,
             )
+        cancelled_at = time.monotonic()
+        assert all_dns_entered.is_set()
+        assert cancel_triggered_at
+        assert cancelled_at - cancel_triggered_at[0] < 1.0
+        dns_release.set()
+        assert all_dns_done.wait(2.0)
     finally:
-        timer.cancel()
-    assert time.monotonic() - started < 1.0
-    dns_release.set()
-    assert dns_done.wait(1.0)
-    time.sleep(0.05)
+        cancel.set()
+        dns_release.set()
+        trigger.join(timeout=2.0)
+        with state_lock:
+            threads_to_join = list(worker_threads)
+        for thread in threads_to_join:
+            thread.join(timeout=2.0)
+    assert all(not thread.is_alive() for thread in threads_to_join)
     assert not connected
 
 
