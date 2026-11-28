@@ -150,8 +150,9 @@ def _label(
     bold: bool = False,
     color: str | None = None,
     word_wrap: bool = False,
+    measure_at_allocated_width: bool = True,
 ) -> QLabel:
-    widget = _WrappedLabel(text) if word_wrap else QLabel(text)
+    widget = _WrappedLabel(text) if word_wrap and measure_at_allocated_width else QLabel(text)
     widget.setWordWrap(word_wrap)
     parts: list[str] = []
     if size is not None:
@@ -663,14 +664,18 @@ class AnalysisView(QScrollArea):
         icon_lbl = _label(icon, size=12, bold=True, color=accent)
         icon_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         top.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
-        stat_label = _label(title, size=8, color=MUTED, word_wrap=True)
+        # The grid measures each card before assigning its new width. Use
+        # the proposed widths so an earlier narrow layout cannot hold it open.
+        stat_label = _label(title, size=8, color=MUTED, word_wrap=True, measure_at_allocated_width=False)
         top.addWidget(stat_label, 1)
         layout.addLayout(top)
 
-        value_label = _label("—", size=16, bold=True, color=accent, word_wrap=True)
+        value_label = _label("—", size=16, bold=True, color=accent, word_wrap=True, measure_at_allocated_width=False)
         layout.addWidget(value_label)
 
-        detail_label = _label("No measurements in scope", size=8, color=SUBTLE, word_wrap=True)
+        detail_label = _label(
+            "No measurements in scope", size=8, color=SUBTLE, word_wrap=True, measure_at_allocated_width=False
+        )
         layout.addWidget(detail_label)
         layout.addStretch(1)
         return frame, stat_label, value_label, detail_label
