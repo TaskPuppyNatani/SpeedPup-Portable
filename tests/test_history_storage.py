@@ -1184,10 +1184,28 @@ def test_non_completed_diagnostics_rejected_by_record_builder() -> None:
             record_from_diagnostics(_sample_diagnostics_result(state=state))
 
 
+def _stub_network_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate offline MainWindow Speed Test runs from live OS route discovery."""
+    import speedpup.gui.workers as gui_workers
+
+    monkeypatch.setattr(
+        gui_workers,
+        "capture_network_context",
+        lambda: NetworkContext(
+            interface_name=Measurement.measured("wlo1"),
+            link_speed_mbps=Measurement.measured(866.7, unit="Mbps"),
+            status=Measurement.measured("Up"),
+            connection_type="wifi",
+        ),
+    )
+
+
 def test_mainwindow_persists_completed_speed_test_and_diagnostics_and_survives_reopen(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _app()
+    _stub_network_context(monkeypatch)
     db_path = tmp_path / "app_history.sqlite3"
     store = SQLiteHistoryStore(db_path)
 
@@ -1223,26 +1241,33 @@ def test_mainwindow_persists_completed_speed_test_and_diagnostics_and_survives_r
     saved_events: list[tuple[str, str]] = []
     window.history_saved.connect(lambda kind, rid: saved_events.append((kind, rid)))
 
-    # 1. Run completed Speed Test
-    window._start_test()
-    assert _wait_until(lambda: window._worker is None and len(saved_events) == 1)
-    assert saved_events[0][0] == MeasurementType.SPEED_TEST.value
+    try:
+        # 1. Run completed Speed Test
+        window._start_test()
+        assert _wait_until(lambda: window._worker is None and len(saved_events) == 1)
+        assert saved_events[0][0] == MeasurementType.SPEED_TEST.value
 
-    # 2. Run completed Diagnostics (Quick with unavailable individual metrics)
-    window._on_diagnostics_run_requested(DiagnosticRequest(profile=DiagnosticProfile.QUICK))
-    assert _wait_until(lambda: window._diagnostics_worker is None and len(saved_events) == 2)
-    assert saved_events[1][0] == MeasurementType.DIAGNOSTICS.value
+        # 2. Run completed Diagnostics (Quick with unavailable individual metrics)
+        window._on_diagnostics_run_requested(DiagnosticRequest(profile=DiagnosticProfile.QUICK))
+        assert _wait_until(lambda: window._diagnostics_worker is None and len(saved_events) == 2)
+        assert saved_events[1][0] == MeasurementType.DIAGNOSTICS.value
 
-    # 3. Duplicate delivery of same completed results does not create duplicate rows.
-    window._on_result(_sample_speed_result())
-    window._on_diagnostics_result(
-        _sample_diagnostics_result(profile=DiagnosticProfile.QUICK, with_unavailable=True)
-    )
-    assert _wait_until(lambda: not window._history_writer.is_running())
-
-    window.close()
-    assert _wait_until(lambda: not window._history_writer.is_running())
-    window.deleteLater()
+        # 3. Duplicate delivery of same completed results does not create duplicate rows.
+        window._on_result(_sample_speed_result())
+        window._on_diagnostics_result(
+            _sample_diagnostics_result(profile=DiagnosticProfile.QUICK, with_unavailable=True)
+        )
+        assert _wait_until(lambda: not window._history_writer.is_running())
+    finally:
+        window.close()
+        assert _wait_until(
+            lambda: window._worker is None
+            and window._diagnostics_worker is None
+            and not window._history_writer.is_running()
+            and not window._speed_history_reader.is_running()
+        )
+        window.deleteLater()
+        store.close()
 
     # Reopen database from scratch and verify both records survived restart.
     reopened = SQLiteHistoryStore(db_path)
@@ -1265,8 +1290,12 @@ def test_mainwindow_persists_completed_speed_test_and_diagnostics_and_survives_r
     reopened.close()
 
 
-def test_mainwindow_cancelled_and_failed_runs_are_not_persisted(tmp_path: Path) -> None:
+def test_mainwindow_cancelled_and_failed_runs_are_not_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _app()
+    _stub_network_context(monkeypatch)
     db_path = tmp_path / "cancel_history.sqlite3"
     store = SQLiteHistoryStore(db_path)
 
@@ -1347,8 +1376,11 @@ def test_mainwindow_cancelled_and_failed_runs_are_not_persisted(tmp_path: Path) 
     assert store.count_records() == 0
 
 
-def test_mainwindow_persistence_failure_is_nonfatal_and_preserves_displayed_results() -> None:
+def test_mainwindow_persistence_failure_is_nonfatal_and_preserves_displayed_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _app()
+    _stub_network_context(monkeypatch)
 
     class FailingHistoryStore:
         def __init__(self) -> None:

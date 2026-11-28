@@ -391,7 +391,7 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
 
         # No wrapped QLabel inside observation cards is vertically clipped
         for obs_w in view._observation_widgets:
-            for lbl in (obs_w.title_label, obs_w.summary_label, obs_w.meta_label):
+            for lbl in (obs_w.title_label, obs_w.summary_label, obs_w.meta_label, *obs_w._wrapped_labels):
                 hfw = lbl.heightForWidth(lbl.width())
                 assert lbl.height() >= hfw - 1, f"Clipped label at {width}x{height}: {lbl.text()!r}"
 
@@ -424,6 +424,9 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
     _settle()
     assert not coverage_widget.details_panel.isHidden()
     assert view.summary_cards[0].height() == card_h_before_expand
+    for lbl in coverage_widget.details_panel.findChildren(QLabel):
+        hfw = lbl.heightForWidth(lbl.width())
+        assert lbl.height() >= hfw - 1, f"Clipped expanded evidence label: {lbl.text()!r}"
 
     # Suggested Next Steps and Measurement Qualifications cards are visible
     next_steps = view.findChild(QFrame, "suggestedNextStepsCard")
@@ -645,3 +648,87 @@ def test_speed_sidebar_insufficient_history_is_not_fault_and_evidence_is_expanda
     assert _wait_until(lambda: not window._speed_history_reader.is_running())
     window.deleteLater()
     store.close()
+
+
+def test_analysis_observation_sidebar_resizes_cleanly_for_larger_fonts_narrow_widths_and_expanded_evidence(
+    tmp_path: Path,
+) -> None:
+    _app()
+    store = SQLiteHistoryStore(tmp_path / "sidebar_font_stress.sqlite3")
+    now = datetime(2026, 11, 27, 15, 0, 0, tzinfo=timezone.utc)
+    for idx, dl in enumerate((360.0, 355.0, 350.0, 210.0, 205.0, 200.0)):
+        store.save_record(_speed_rec(f"sp-{idx}", now - timedelta(days=6 - idx), dl=dl, ul=40.0))
+    store.save_record(_diag_rec("dg-std", now - timedelta(days=2), profile=DiagnosticProfile.STANDARD, grade=None))
+    store.save_record(_diag_rec("dg-full", now - timedelta(hours=1), profile=DiagnosticProfile.FULL, grade=BufferbloatGrade.B))
+
+    window = MainWindow(history_store=store)
+    try:
+        window.show()
+        window._nav_buttons[ANALYSIS_PAGE_INDEX].click()
+        assert _wait_until(
+            lambda: not window._analysis_reader.is_running()
+            and window.analysis_view.view_state in ("loaded", "partial")
+        )
+        view = window.analysis_view
+        assert view._observation_widgets
+
+        # Simulate taller cross-platform font metrics (e.g., Windows Segoe UI / high DPI).
+        for obs_w in view._observation_widgets:
+            for lbl in (*obs_w._wrapped_labels, *obs_w._detail_labels):
+                lbl.setStyleSheet("font-size: 12pt; color: #eceaf3;")
+        _settle()
+
+        window.resize(1280, 720)
+        _settle()
+        for obs_w in view._observation_widgets:
+            for lbl in obs_w._wrapped_labels:
+                hfw = lbl.heightForWidth(lbl.width())
+                assert lbl.height() >= hfw - 1, f"Clipped at 1280x720 (12pt): {lbl.text()!r}"
+        summary_1280_h = view._observation_widgets[0].summary_label.height()
+        summary_1280_w = view._observation_widgets[0].summary_label.width()
+
+        # Narrow viewport stays unclipped.
+        window.resize(1000, 680)
+        _settle()
+        for obs_w in view._observation_widgets:
+            for lbl in obs_w._wrapped_labels:
+                hfw = lbl.heightForWidth(lbl.width())
+                assert lbl.height() >= hfw - 1, f"Clipped at 1000x680 (12pt): {lbl.text()!r}"
+
+        # Widening shrinks wrapped observation labels back down rather than locking narrow heights.
+        window.resize(1920, 1080)
+        _settle()
+        obs0_summary = view._observation_widgets[0].summary_label
+        hfw_1920 = obs0_summary.heightForWidth(obs0_summary.width())
+        assert obs0_summary.height() >= hfw_1920 - 1
+        if obs0_summary.width() > summary_1280_w and hfw_1920 < summary_1280_h:
+            assert obs0_summary.height() < summary_1280_h
+
+        # Expanding and collapsing evidence at 1280x720 keeps labels unclipped and summary cards steady.
+        window.resize(1280, 720)
+        _settle()
+        card_h_before = view.summary_cards[0].height()
+        page_h_collapsed = view._page.height()
+        expandable = [w for w in view._observation_widgets if w.toggle_button is not None]
+        assert expandable
+        for obs_w in expandable:
+            obs_w.toggle_button.click()
+        _settle()
+        assert view._page.height() > page_h_collapsed
+        assert view.summary_cards[0].height() == card_h_before
+        for obs_w in expandable:
+            assert obs_w.details_panel is not None and not obs_w.details_panel.isHidden()
+            for lbl in (*obs_w._wrapped_labels, *obs_w._detail_labels):
+                hfw = lbl.heightForWidth(lbl.width())
+                assert lbl.height() >= hfw - 1, f"Clipped expanded label (12pt): {lbl.text()!r}"
+
+        for obs_w in expandable:
+            obs_w.toggle_button.click()
+        _settle()
+        assert view._page.height() < page_h_collapsed + 5
+        assert view.summary_cards[0].height() == card_h_before
+    finally:
+        window.close()
+        assert _wait_until(lambda: not window._speed_history_reader.is_running())
+        window.deleteLater()
+        store.close()
