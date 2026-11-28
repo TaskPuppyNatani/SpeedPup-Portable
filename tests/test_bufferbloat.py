@@ -244,7 +244,7 @@ def test_shared_budget_releases_unused_reservations():
     ({'clean': True, 'errors': ['HTTP 500'], 'bytes': 2_000_000, 'accepted': 2_000_000}, None, 6, {}, 'endpoint failure'),
     ({'clean': True, 'bytes': 500, 'accepted': 500}, None, 6, {}, 'Insufficient sustained'),
     (None, None, 0, {'timed_out': True}, 'supervising deadline'),
-    (None, None, 0, {'exit_code': 1, 'saw_events': False, 'stderr_tail': "ModuleNotFoundError: No module named 'speedpup'"}, 'could not start'),
+    (None, None, 0, {'exit_code': 1, 'saw_events': False}, 'could not start'),
     (None, None, 0, {'exit_code': 0, 'saw_events': True}, 'ended before reporting results'),
     ({'clean': False, 'bytes': 2_000_000, 'accepted': 2_000_000, 'errors': []}, None, 6, {}, 'cleanup window'),
     ({'clean': True, 'bytes': 0, 'accepted': 0, 'errors': [], 'exit_reason': 'discovery-timeout'}, None, 0, {}, 'discovery exceeded its time allowance'),
@@ -258,7 +258,7 @@ def test_load_failure_classification_names_each_lifecycle_outcome(done, error, d
 def test_lifecycle_reasons_are_mutually_distinct():
     outcomes = [
         classify_load(None, None, 0, timed_out=True)[1],
-        classify_load(None, None, 0, exit_code=1, saw_events=False, stderr_tail='boom')[1],
+        classify_load(None, None, 0, exit_code=1, saw_events=False)[1],
         classify_load(None, None, 0, exit_code=0, saw_events=True)[1],
         classify_load({'clean': False, 'bytes': 1, 'accepted': 1, 'errors': []}, None, 6)[1],
         classify_load({'clean': True, 'bytes': 1, 'accepted': 1, 'errors': [], 'exit_reason': 'discovery-timeout'}, None, 0)[1],
@@ -363,3 +363,71 @@ print(json.dumps({'kind':'done', 'at':time.monotonic(), 'bytes':131072, 'accepte
     assert len(calls) <= 1
     assert result.attempted == len(calls)
     assert not result.adequate
+
+
+def test_private_load_child_errors_do_not_reach_history_exports_or_trace(monkeypatch, tmp_path):
+    import json
+    import sqlite3
+    from speedpup.core import bufferbloat, diagnostic_trace, diagnostics_backend as backend
+    from speedpup.core.history import HistoryQuery, record_from_diagnostics
+    from speedpup.core.history_export import ExportFormat, ExportScope, ExportScopeKind, export_history
+    from speedpup.core.history_store import SQLiteHistoryStore
+
+    sensitive = (
+        'Traceback (most recent call last):\n'
+        '  File "/home/fixture-linux/private.py", line 5\n'
+        '  File "C:\\Users\\fixture-win\\bad.py", line 2\n'
+        '  File "/Users/fixture-mac/private.py", line 9\n'
+        'RuntimeError: /final-line/private.ini password=fixture-password '
+        'token=fixture-token https://fixture.invalid/file?key=fixture-query'
+    )
+    sentinels = ("Traceback", "fixture-linux", "fixture-win", "fixture-mac", "final-line",
+                 "fixture-password", "fixture-token", "fixture-query")
+    trace_path = tmp_path / 'local-trace.jsonl'
+    monkeypatch.setenv(diagnostic_trace.TRACE_ENV, str(trace_path))
+    original = subprocess.Popen
+    children = []
+
+    def synthetic_child(args, **kwargs):
+        script = f"import sys; sys.stderr.write({sensitive!r}); "
+        if args[-2] == 'download':
+            script += "sys.exit(7)"
+        else:
+            script += f"print({json.dumps({'kind': 'error', 'message': sensitive})!r}); sys.exit(8)"
+        child = original([sys.executable, '-c', script], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(bufferbloat.subprocess, 'Popen', synthetic_child)
+    monkeypatch.setattr(backend, '_gateway', lambda *_: None)
+    monkeypatch.setattr(backend, 'default_route_interface', lambda: None)
+    monkeypatch.setattr(backend, 'PsutilProvider', lambda: SimpleNamespace(discover_interfaces=lambda: ()))
+    monkeypatch.setattr(backend, '_system_dns', lambda *_: (5, None))
+    monkeypatch.setattr(backend, 'ping_once', lambda *_: PingSample(10))
+    monkeypatch.setattr(bufferbloat, 'ping_once', lambda *_: PingSample(10))
+    monkeypatch.setattr(NetworkDiagnosticsBackend, '_collect_standard_probes',
+                        lambda *_: ([], [10]*3, [10]*3, [False]*3, 0, [], 2))
+    result = NetworkDiagnosticsBackend(waiter=lambda *_: None).run_diagnostics(
+        DiagnosticRequest(profile=DiagnosticProfile.FULL)
+    )
+    assert [child.poll() for child in children] == [7, 8]
+    assert not result.bufferbloat_grade.available
+    assert 'Load process could not start; exit status 7' in result.bufferbloat_note
+    assert 'Load endpoint failure; exit status 8' in result.bufferbloat_note
+    assert all(value not in repr(result) for value in sentinels)
+    assert all(value not in trace_path.read_text(encoding='utf-8') for value in sentinels)
+
+    db = tmp_path / 'privacy.sqlite3'
+    store = SQLiteHistoryStore(db)
+    store.save_record(record_from_diagnostics(result, record_id='synthetic-child'))
+    with sqlite3.connect(db) as conn:
+        assert all(value not in '\n'.join(conn.iterdump()) for value in sentinels)
+    assert store.list_records(HistoryQuery(search_text='fixture-password')).total_count == 0
+    for fmt in ExportFormat:
+        path = tmp_path / f'child{fmt.extension}'
+        export_history(store, scope=ExportScope(kind=ExportScopeKind.ALL), fmt=fmt, destination=path)
+        content = path.read_text(encoding='utf-8')
+        assert 'Load process could not start; exit status 7' in content
+        assert 'Load endpoint failure; exit status 8' in content
+        assert all(value not in content for value in sentinels)
+    store.close()

@@ -746,11 +746,21 @@ class DiagnosticsView(QScrollArea):
             default_detail = "Diagnostics finished."
 
         summary = result.summary or default_detail
+        self._last_result_summary = summary
         self.status_label.setText(summary)
         self.status_label.setStyleSheet(f"font-size: 9pt; color: {GREEN};")
         self.side_status_state.setText("Completed")
         self.side_status_state.setStyleSheet(f"font-size: 14pt; font-weight: 700; color: {GREEN};")
         self.side_status_detail.setText(summary)
+
+    def apply_persistence_warning(self, message: str) -> None:
+        """Report a nonfatal local history save failure without clearing measurements."""
+        if self._running or not self._has_result:
+            return
+        detail = message.strip() or "Could not save local history."
+        base = getattr(self, "_last_result_summary", "") or "Diagnostics finished."
+        self.status_label.setText(f"{base} · History not saved: {detail}")
+        self.status_label.setStyleSheet(f"font-size: 9pt; color: {WARNING};")
 
     def apply_cancelled(self, message: str | None = None) -> None:
         self._running = False

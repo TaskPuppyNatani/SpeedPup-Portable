@@ -85,9 +85,19 @@ def test_launch_or_import_failure_is_named(monkeypatch):
                       "import sys; print('ModuleNotFoundError: No module named \\'speedpup\\'', file=sys.stderr); sys.exit(1)")
     result = _run()
     assert 'could not start' in result.reason
-    assert 'ModuleNotFoundError' in result.reason
-    assert 'exit 1' in result.reason
+    assert 'ModuleNotFoundError' not in result.reason
+    assert 'exit status 1' in result.reason
     assert children[0].poll() == 1
+
+
+def test_launch_exception_keeps_only_the_failure_classification(monkeypatch):
+    def fail_to_launch(*args, **kwargs):
+        raise OSError("private fixture /Users/load-test?token=fixture-launch-token")
+
+    monkeypatch.setattr(bufferbloat.subprocess, "Popen", fail_to_launch)
+    result = _run()
+    assert result.reason == "Load process could not start"
+    assert result.failure_codes == ("child_launch_failed",)
 
 
 def test_premature_child_exit_is_named(monkeypatch):
@@ -444,7 +454,17 @@ def test_child_failing_after_done_cannot_qualify_for_grade():
     done = {'clean': True, 'bytes': 2_000_000, 'accepted': 2_000_000,
             'errors': [], 'exit_reason': 'completed'}
     adequate, reason = bufferbloat.classify_load(done, None, 6, exit_code=1)
-    assert not adequate and 'exit 1' in reason
+    assert not adequate and 'exit status 1' in reason
+
+
+def test_invalid_child_result_does_not_expose_raw_value(monkeypatch):
+    _child(monkeypatch, """print('[]')
+print('{"kind":"done","clean":true,"bytes":"token=fixture-invalid-status"}')
+""")
+    result = _run()
+    assert not result.adequate and 'missing_child_result' in result.failure_codes
+    assert 'ended before reporting results' in result.reason
+    assert 'fixture-invalid-status' not in result.reason
 
 
 def test_real_supervisor_replays_native_partial_worker_timeout(monkeypatch):

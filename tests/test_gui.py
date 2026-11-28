@@ -36,7 +36,8 @@ def test_window_builds_all_pages_and_uses_original_logo() -> None:
     assert window._stack.count() == 7
     logo = next(label for label in window.findChildren(QLabel) if label.accessibleName() == "TaskPuppyKreations logo")
     assert not logo.pixmap().isNull()
-    assert any(label.text() == "Not assessed" for label in window.findChildren(QLabel))
+    assert 'No Speed Test completed in this session' in window.speed_current_detail.text()
+    assert 'history' in window.speed_history_detail.text().lower()
     window.close()
     window.deleteLater()
 

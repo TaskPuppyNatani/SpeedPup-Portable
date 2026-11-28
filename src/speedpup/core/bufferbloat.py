@@ -7,6 +7,7 @@ from datetime import datetime
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -36,14 +37,17 @@ class LoadResult:
 
 SUPERVISOR_SECONDS = 35.0
 EXIT_GRACE_SECONDS = 1.0
-STDERR_WINDOW = 4096
-REASON_DETAIL_LIMIT = 240
 
-
-def _sanitize(text: str) -> str:
-    """Collapse a child's stderr to a short printable tail safe to surface in a reason."""
-    collapsed = ' '.join(''.join(ch if ch.isprintable() else ' ' for ch in text).split())
-    return collapsed[-REASON_DETAIL_LIMIT:]
+def _endpoint_failure(message: object) -> str:
+    # Child text is untrusted. Reconstruct only known diagnostics and bounded codes.
+    if isinstance(message, str):
+        if message == 'endpoint setup exceeded its time allowance':
+            return 'Load endpoint failure (connection setup exceeded its time allowance)'
+        if message == 'Upload endpoint returned an unexpected body':
+            return 'Load endpoint failure (unexpected upload response)'
+        if re.fullmatch(r'HTTP [1-5][0-9]{2}', message):
+            return f'Load endpoint failure ({message})'
+    return 'Load endpoint failure'
 
 
 def grade_increase(increase_ms: float) -> BufferbloatGrade:
@@ -136,9 +140,9 @@ def _survivor_evidence(done, activity, probes, start, stage):
 
 
 def classify_load(done, error, duration, *, timed_out=False, exit_code=None,
-                  saw_events=False, stderr_tail='', cleanup_failed=False):
+                  saw_events=False, cleanup_failed=False):
     """Name the actual lifecycle outcome instead of collapsing distinct failures together."""
-    detail = f' ({stderr_tail})' if stderr_tail else ''
+    exit_status = f'; exit status {exit_code}' if type(exit_code) is int and abs(exit_code) <= 0xFFFFFFFF else ''
     if timed_out:
         return False, f'Load process exceeded the {SUPERVISOR_SECONDS:.0f} s supervising deadline'
     exit_reason = done.get('exit_reason') if done else None
@@ -152,18 +156,18 @@ def classify_load(done, error, duration, *, timed_out=False, exit_code=None,
     if cleanup_failed:
         return False, 'Load process did not exit after reporting results'
     if done is not None and exit_code not in (None, 0):
-        return False, f'Load process failed after reporting results{detail} (exit {exit_code})'
+        return False, 'Load process failed after reporting results' + exit_status
     if error:
-        return False, 'Load endpoint failure: ' + str(error)
+        return False, _endpoint_failure(error) + (exit_status if exit_code else '')
     if done is None:
-        if not saw_events:
-            return False, f'Load process could not start{detail} (exit {exit_code})'
-        return False, f'Load process ended before reporting results{detail} (exit {exit_code})'
+        if not saw_events and exit_code != 0:
+            return False, 'Load process could not start' + exit_status
+        return False, 'Load process ended before reporting results' + exit_status
     worker_results = done.get('worker_results')
     if isinstance(worker_results, dict) and 'cleanup_failure' in worker_results.values():
         return False, 'Load worker connection cleanup failed'
     if done.get('errors'):
-        return False, 'Load endpoint failure: ' + str(done['errors'][0])
+        return False, _endpoint_failure(done['errors'][0])
     if not done.get('clean'):
         return False, 'Load workers did not stop within the cleanup window'
     transferred = done.get('bytes', 0)
@@ -180,7 +184,7 @@ def classify_load(done, error, duration, *, timed_out=False, exit_code=None,
 
 def _classify_with_survivors(done, error, duration, activity, probes, start, stage, *,
                              timed_out=False, exit_code=None, saw_events=False,
-                             stderr_tail='', cleanup_failed=False):
+                             cleanup_failed=False):
     recovery = None
     if (done and done.get('errors') and not error and done.get('clean') and
             not timed_out and not cleanup_failed and exit_code == 0):
@@ -195,7 +199,7 @@ def _classify_with_survivors(done, error, duration, activity, probes, start, sta
         duration = survivor_duration
     adequate, reason = classify_load(classification, error, duration, timed_out=timed_out,
                                      exit_code=exit_code, saw_events=saw_events,
-                                     stderr_tail=stderr_tail, cleanup_failed=cleanup_failed)
+                                     cleanup_failed=cleanup_failed)
     if adequate and qualifications:
         reason += '; ' + qualifications[0]
     return adequate, reason, recovery, qualifications
@@ -210,7 +214,7 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
         if not isinstance(server, Server):
             raise ValueError('reused server must be a validated Server')
         reused_entry = server_to_entry(server_from_entry(server_to_entry(server)))
-    options = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE, 'text': True, 'bufsize': 1}
+    options = {'stdout': subprocess.PIPE, 'stderr': subprocess.DEVNULL, 'text': True, 'bufsize': 1}
     trace = current_trace()
     child_env = os.environ.copy()
     child_env.pop('SPEEDPUP_DIAGNOSTIC_TRACE', None)
@@ -233,7 +237,7 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
         proc = subprocess.Popen([sys.executable, '-m', 'speedpup.core.diagnostic_load', direction, str(budget_mib)], **options)
     except OSError as exc:
         trace_record('stage_launch_failed', direction=direction, error_type=type(exc).__name__)
-        return LoadResult((), False, f'Load process unavailable: {exc}', failure_codes=('child_launch_failed',))
+        return LoadResult((), False, 'Load process could not start', failure_codes=('child_launch_failed',))
     if reused_entry is not None and proc.stdin is not None:
         try:
             proc.stdin.write(json.dumps(reused_entry) + '\n')
@@ -247,7 +251,6 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
                 pass
     lock = threading.Lock()
     events = []
-    stderr_chunks = []
 
     def read_events():
         for line in proc.stdout:
@@ -255,7 +258,9 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
                 event = json.loads(line)
             except (ValueError, TypeError):
                 continue
-            if trace is not None and isinstance(event, dict):
+            if not isinstance(event, dict):
+                continue
+            if trace is not None:
                 kind = event.get('kind')
                 if kind == 'trace':
                     allowed = ('name', 'at', 'duration_ms', 'status', 'worker', 'thread',
@@ -268,17 +273,8 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
             with lock:
                 events.append(event)
 
-    def read_stderr():
-        for line in proc.stderr:
-            with lock:
-                stderr_chunks.append(line)
-                while sum(len(chunk) for chunk in stderr_chunks) > STDERR_WINDOW and len(stderr_chunks) > 1:
-                    stderr_chunks.pop(0)
-
     reader = threading.Thread(target=read_events, daemon=True)
     reader.start()
-    error_reader = threading.Thread(target=read_stderr, daemon=True)
-    error_reader.start()
     probes = []
     launch = time.monotonic()
     next_probe = 0.0
@@ -328,15 +324,18 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
         proc.wait()
         trace_record('child_reaped', direction=direction, exit_code=proc.returncode)
         reader.join()
-        error_reader.join()
         proc.stdout.close()
-        proc.stderr.close()
 
     with lock:
         observed = list(events)
-        stderr_tail = _sanitize(''.join(stderr_chunks))
     activity = [e for e in observed if e.get('kind') == 'activity']
     done = next((e for e in observed if e.get('kind') == 'done'), None)
+    if done is not None and (
+        any(type(done.get(key, 0)) is not int or done.get(key, 0) < 0 for key in ('bytes', 'accepted'))
+        or type(done.get('clean')) is not bool
+        or not isinstance(done.get('errors', []), list)
+    ):
+        done = None
     samples = []
     for before, after, timestamp, probe in probes:
         # Require byte counters increasing on both sides of the entire probe.
@@ -358,7 +357,7 @@ def run_load_stage(direction, target, start, cancel_event, report, budget_mib=12
     adequate, reason, recovery, qualifications = _classify_with_survivors(
         done, error, duration, activity, probes, start, stage, timed_out=timed_out,
         exit_code=proc.returncode, saw_events=bool(observed),
-        stderr_tail=stderr_tail, cleanup_failed=cleanup_failed)
+        cleanup_failed=cleanup_failed)
     if recovery is not None:
         samples, duration = recovery[:2]
     failures = []
