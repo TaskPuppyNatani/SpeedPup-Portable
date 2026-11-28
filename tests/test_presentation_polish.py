@@ -397,17 +397,31 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
         view.bufferbloat_value_label,
         view.bufferbloat_detail_label,
     )
-    for width, height, max_card_h in ((1280, 720, 210), (1920, 1080, 170), (3440, 1440, 140)):
+    for width, height in ((1280, 720), (1920, 1080), (3440, 1440)):
         window.resize(width, height)
         _settle()
         heights = [card.height() for card in view.summary_cards]
         # All 4 cards stay aligned and compact (never ballooning to match sidebar)
         assert len(set(heights)) == 1
-        assert 70 <= heights[0] <= max_card_h, f"Unexpected summary card height {heights[0]} at {width}x{height}"
+        required_heights = []
+        for card in view.summary_cards:
+            layout = card.layout()
+            measured = layout.totalHeightForWidth(card.width())
+            required_heights.append(measured if measured >= 0 else layout.sizeHint().height())
+        required_height = max(required_heights)
+        assert heights[0] >= required_height
+        # Allow up to two text lines for the shared row's width-dependent sizing.
+        line_height = max(QFontMetrics(label.font()).height() for label in summary_labels)
+        assert heights[0] <= required_height + 2 * line_height
         # No wrapped QLabel inside summary cards is vertically clipped
         for lbl in summary_labels:
-            hfw = lbl.heightForWidth(lbl.width())
+            hfw = QLabel.heightForWidth(lbl, lbl.width())
             assert lbl.height() >= hfw - 1, f"Clipped summary label at {width}x{height}: {lbl.text()!r}"
+            child = lbl
+            while child is not view.widget():
+                parent = child.parentWidget()
+                assert parent.contentsRect().contains(child.geometry()), lbl.text()
+                child = parent
 
         # No wrapped QLabel inside observation cards is vertically clipped
         _assert_observation_geometry(view)
@@ -447,8 +461,9 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
     assert not coverage_widget.details_panel.isHidden()
     assert view.summary_cards[0].height() == card_h_before_expand
     for lbl in coverage_widget.details_panel.findChildren(QLabel):
-        hfw = lbl.heightForWidth(lbl.width())
+        hfw = QLabel.heightForWidth(lbl, lbl.width())
         assert lbl.height() >= hfw - 1, f"Clipped expanded evidence label: {lbl.text()!r}"
+    _assert_observation_geometry(view)
 
     # Suggested Next Steps and Measurement Qualifications cards are visible
     next_steps = view.findChild(QFrame, "suggestedNextStepsCard")
