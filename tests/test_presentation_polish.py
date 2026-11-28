@@ -363,6 +363,20 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
         assert "planned for phase 4c" not in lbl.text().lower()
 
     # Check responsive layouts across all 3 representative sizes
+    summary_labels = (
+        view.download_stat_label,
+        view.download_value_label,
+        view.download_detail_label,
+        view.upload_stat_label,
+        view.upload_value_label,
+        view.upload_detail_label,
+        view.icmp_stat_label,
+        view.icmp_value_label,
+        view.icmp_detail_label,
+        view.bufferbloat_stat_label,
+        view.bufferbloat_value_label,
+        view.bufferbloat_detail_label,
+    )
     for width, height, max_card_h in ((1280, 720, 210), (1920, 1080, 170), (3440, 1440, 140)):
         window.resize(width, height)
         _settle()
@@ -370,6 +384,10 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
         # All 4 cards stay aligned and compact (never ballooning to match sidebar)
         assert len(set(heights)) == 1
         assert 70 <= heights[0] <= max_card_h, f"Unexpected summary card height {heights[0]} at {width}x{height}"
+        # No wrapped QLabel inside summary cards is vertically clipped
+        for lbl in summary_labels:
+            hfw = lbl.heightForWidth(lbl.width())
+            assert lbl.height() >= hfw - 1, f"Clipped summary label at {width}x{height}: {lbl.text()!r}"
 
         # No wrapped QLabel inside observation cards is vertically clipped
         for obs_w in view._observation_widgets:

@@ -352,29 +352,64 @@ def test_storage_paths_cover_linux_windows_macos_and_portable_override(tmp_path:
         resolve_data_dir(env={DATA_DIR_ENV: "relative/portable"}, platform_name="linux")
 
     with pytest.raises(HistoryPathError):
+        resolve_data_dir(env={DATA_DIR_ENV: "relative\\portable"}, platform_name="win32")
+
+    with pytest.raises(HistoryPathError):
+        resolve_data_dir(env={DATA_DIR_ENV: "relative/portable"}, platform_name="darwin")
+
+    with pytest.raises(HistoryPathError):
+        resolve_data_dir(env={}, platform_name="linux", home="relative/home")
+
+    with pytest.raises(HistoryPathError):
+        resolve_data_dir(env={}, platform_name="win32", home=r"relative\home")
+
+    with pytest.raises(HistoryPathError):
+        resolve_data_dir(env={}, platform_name="darwin", home="relative/home")
+
+    with pytest.raises(HistoryPathError):
         resolve_history_db_path(":memory:")
 
-    # Default resolution must not depend on CWD and must not create files.
-    repo_root = Path(__file__).resolve().parents[1]
-    before_cwd = resolve_history_db_path(env={}, platform_name="linux", home=str(tmp_path / "home"))
-    assert not before_cwd.exists()
-    assert not before_cwd.parent.exists()
-    assert repo_root not in before_cwd.parents
-
-    snippet = (
-        "import os; "
+    # Simulated Linux resolution does not depend on the process working directory.
+    sim_snippet = (
         "from speedpup.core.history_paths import resolve_history_db_path; "
         "print(resolve_history_db_path(env={}, platform_name='linux', home='/home/alice'))"
     )
-    proc = subprocess.run(
-        [sys.executable, "-c", snippet],
+    sim_proc = subprocess.run(
+        [sys.executable, "-c", sim_snippet],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == f"/home/alice/.local/share/speedpup-portable/{HISTORY_DB_FILENAME}"
+    assert sim_proc.returncode == 0, sim_proc.stderr
+    assert sim_proc.stdout.strip() == f"/home/alice/.local/share/speedpup-portable/{HISTORY_DB_FILENAME}"
+
+    # Host-native default resolution returns a concrete Path, does not create files,
+    # stays outside the repository, and does not depend on CWD.
+    repo_root = Path(__file__).resolve().parents[1]
+    native_home = tmp_path / "home"
+    native_db = resolve_history_db_path(env={}, home=native_home)
+    assert isinstance(native_db, Path)
+    assert native_db.is_absolute()
+    assert not native_db.exists()
+    assert not native_db.parent.exists()
+    assert repo_root not in native_db.parents
+    assert native_home in native_db.parents
+
+    native_snippet = (
+        "import sys; "
+        "from speedpup.core.history_paths import resolve_history_db_path; "
+        "print(resolve_history_db_path(env={}, home=sys.argv[1]))"
+    )
+    native_proc = subprocess.run(
+        [sys.executable, "-c", native_snippet, str(native_home)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert native_proc.returncode == 0, native_proc.stderr
+    assert native_proc.stdout.strip() == str(native_db)
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -353,6 +353,106 @@ class _ObservationDisclosureWidget(QFrame):
             parent = parent.parentWidget()
 
 
+class _SummaryCardsGrid(QWidget):
+    """Responsive 4-card container: 2x2 on compact viewports, 1x4 on wider desktops.
+
+    Preserves uniform card heights across all four cards using live
+    font-metric height-for-width queries without fixed-height text clipping.
+    """
+
+    _FOUR_COL_MIN_WIDTH = 860
+    _SPACING = 10
+
+    def __init__(self, cards: Sequence[QFrame], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cards = tuple(cards)
+        self._columns = 0
+        self.setStyleSheet("background: transparent;")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(self._SPACING)
+        self._grid.setVerticalSpacing(self._SPACING)
+        self._apply_columns(4)
+
+    @classmethod
+    def _columns_for_width(cls, width: int) -> int:
+        if 0 < width < cls._FOUR_COL_MIN_WIDTH:
+            return 2
+        return 4
+
+    @staticmethod
+    def _card_height_for_width(card: QFrame, card_width: int) -> int:
+        if card.hasHeightForWidth():
+            h = card.heightForWidth(card_width)
+            if h > 0:
+                return h
+        return card.sizeHint().height()
+
+    def _row_height_for(self, total_width: int, columns: int) -> int:
+        avail = max(columns * 120, total_width - self._SPACING * (columns - 1))
+        card_w = avail // columns
+        return max(
+            (self._card_height_for_width(card, card_w) for card in self._cards),
+            default=0,
+        )
+
+    def _apply_columns(self, columns: int) -> bool:
+        if columns == self._columns:
+            return False
+        self._columns = columns
+        while self._grid.count():
+            self._grid.takeAt(0)
+        for col in range(4):
+            self._grid.setColumnStretch(col, 1 if col < columns else 0)
+        for row in range(2):
+            self._grid.setRowMinimumHeight(row, 0)
+            self._grid.setRowStretch(row, 0)
+        for idx, card in enumerate(self._cards):
+            self._grid.addWidget(card, idx // columns, idx % columns)
+        return True
+
+    def sync_layout(self, width: int | None = None) -> None:
+        effective_w = self.width() if width is None else width
+        if effective_w <= 0:
+            effective_w = self._FOUR_COL_MIN_WIDTH
+        columns = self._columns_for_width(effective_w)
+        changed = self._apply_columns(columns)
+        if columns == 2:
+            row_h = self._row_height_for(effective_w, 2)
+            self._grid.setRowMinimumHeight(0, row_h)
+            self._grid.setRowMinimumHeight(1, row_h)
+        else:
+            self._grid.setRowMinimumHeight(0, 0)
+            self._grid.setRowMinimumHeight(1, 0)
+        if changed or columns == 2:
+            self._grid.invalidate()
+            self.updateGeometry()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        columns = self._columns_for_width(width)
+        row_h = self._row_height_for(width, columns)
+        if columns == 2:
+            return row_h * 2 + self._SPACING
+        return row_h
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        base = super().sizeHint()
+        width = self.width() if self.width() > 0 else max(base.width(), self._FOUR_COL_MIN_WIDTH)
+        return QSize(base.width(), self.heightForWidth(width))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        min_card_w = max((card.minimumSizeHint().width() for card in self._cards), default=100)
+        return QSize(min_card_w * 2 + self._SPACING, 70)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self.sync_layout(event.size().width())
+
+
 class AnalysisView(QScrollArea):
     """Connection Analysis and evidence-qualified historical observations."""
 
@@ -542,12 +642,12 @@ class AnalysisView(QScrollArea):
         frame.setObjectName(object_name)
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(13, 10, 13, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(3)
 
         top = QHBoxLayout()
         top.setSpacing(6)
-        icon_lbl = _label(icon, size=13, bold=True, color=accent)
+        icon_lbl = _label(icon, size=12, bold=True, color=accent)
         icon_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         top.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
         stat_label = _label(title, size=8, color=MUTED, word_wrap=True)
@@ -563,13 +663,6 @@ class AnalysisView(QScrollArea):
         return frame, stat_label, value_label, detail_label
 
     def _build_summary_cards(self) -> QWidget:
-        container = QWidget()
-        container.setStyleSheet("background: transparent;")
-        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(10)
-
         dl_card, self.download_stat_label, self.download_value_label, self.download_detail_label = (
             self._make_summary_card("↓", "Median download", GREEN, "diagMetricGreen")
         )
@@ -584,10 +677,8 @@ class AnalysisView(QScrollArea):
         )
 
         self.summary_cards: tuple[QFrame, ...] = (dl_card, ul_card, icmp_card, bb_card)
-        for card in self.summary_cards:
-            row.addWidget(card, 1)
-        self.summary_cards_container = container
-        return container
+        self.summary_cards_container = _SummaryCardsGrid(self.summary_cards)
+        return self.summary_cards_container
 
     def _wrap_chart_card(
         self,
@@ -1143,6 +1234,7 @@ class AnalysisView(QScrollArea):
             run_noun="Diagnostics",
         )
         self._render_bufferbloat_card(result.bufferbloat)
+        self.summary_cards_container.sync_layout()
 
     @staticmethod
     def _set_meta(label: QLabel, text: str) -> None:

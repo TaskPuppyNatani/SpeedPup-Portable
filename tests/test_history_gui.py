@@ -649,8 +649,21 @@ def test_full_history_search_filters_sorting_and_pagination(tmp_path: Path) -> N
 
 def test_stable_selection_survives_refresh_and_new_measurements_appear_without_restart(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import speedpup.gui.workers as gui_workers
+
     _app()
+    monkeypatch.setattr(
+        gui_workers,
+        "capture_network_context",
+        lambda: NetworkContext(
+            interface_name=Measurement.measured("wlo1"),
+            link_speed_mbps=Measurement.measured(866.7, unit="Mbps"),
+            status=Measurement.measured("Up"),
+            connection_type="wifi",
+        ),
+    )
     db_path = tmp_path / "live_sync.sqlite3"
     store = SQLiteHistoryStore(db_path)
     t0 = datetime(2026, 11, 27, 17, 0, 0, tzinfo=timezone.utc)
@@ -677,33 +690,40 @@ def test_stable_selection_survives_refresh_and_new_measurements_appear_without_r
 
     window = MainWindow(history_store=store)
     window._engine = StubSpeedEngine()
+    try:
+        # Open History and select the initial record at row 0.
+        window._nav_buttons[HISTORY_PAGE_INDEX].click()
+        assert _wait_until(
+            lambda: not window._history_reader.is_running()
+            and window.history_view.table.rowCount() == 1
+        )
+        assert window.history_view.select_record("rec-keep-selected")
+        assert window.history_view.selected_record_id() == "rec-keep-selected"
 
-    # Open History and select the initial record at row 0.
-    window._nav_buttons[HISTORY_PAGE_INDEX].click()
-    assert _wait_until(
-        lambda: not window._history_reader.is_running()
-        and window.history_view.table.rowCount() == 1
-    )
-    assert window.history_view.select_record("rec-keep-selected")
-    assert window.history_view.selected_record_id() == "rec-keep-selected"
-
-    # Trigger a new completed Speed Test while History is open -> new row lands at row 0,
-    # shifting "rec-keep-selected" to row 1, while selection stays pinned to "rec-keep-selected"!
-    window._start_test()
-    assert _wait_until(
-        lambda: window._worker is None
-        and not window._history_writer.is_running()
-        and not window._history_reader.is_running()
-        and window.history_view.table.rowCount() == 2
-    )
-    assert window.history_view.table.item(0, 4).text() == "410.0 Mbps"
-    assert window.history_view.table.item(1, 0).data(Qt.ItemDataRole.UserRole) == "rec-keep-selected"
-    assert window.history_view.selected_record_id() == "rec-keep-selected"
-    assert window.history_view.table.currentRow() == 1
-
-    window.close()
-    window.deleteLater()
-    store.close()
+        # Trigger a new completed Speed Test while History is open -> new row lands at row 0,
+        # shifting "rec-keep-selected" to row 1, while selection stays pinned to "rec-keep-selected"!
+        window._start_test()
+        assert _wait_until(
+            lambda: window._worker is None
+            and not window._history_writer.is_running()
+            and not window._history_reader.is_running()
+            and window.history_view.table.rowCount() == 2
+        )
+        assert window.last_persistence_error is None
+        assert window.history_view.table.item(0, 4).text() == "410.0 Mbps"
+        assert window.history_view.table.item(1, 0).data(Qt.ItemDataRole.UserRole) == "rec-keep-selected"
+        assert window.history_view.selected_record_id() == "rec-keep-selected"
+        assert window.history_view.table.currentRow() == 1
+    finally:
+        window.close()
+        _wait_until(
+            lambda: window._worker is None
+            and not window._history_writer.is_running()
+            and not window._history_reader.is_running()
+            and not window._speed_history_reader.is_running()
+        )
+        window.deleteLater()
+        store.close()
 
 
 def test_history_waits_for_in_flight_async_write_without_racing(tmp_path: Path) -> None:
