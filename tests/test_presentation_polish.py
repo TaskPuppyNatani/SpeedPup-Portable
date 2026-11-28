@@ -46,7 +46,7 @@ from speedpup.core.intelligence import Fact, IntelligenceResult, Severity, evalu
 from speedpup.core.models import Server, TestResult as SpeedTestResult
 from speedpup.gui.intelligence_presentation import build_intelligence_presentation
 from speedpup.gui.main_window import ANALYSIS_PAGE_INDEX, HISTORY_PAGE_INDEX, MainWindow
-from speedpup.gui.table_layout import ColumnSpec, compute_column_widths
+from speedpup.gui.table_layout import ColumnSpec, compute_column_widths, measure_required_column_widths
 from speedpup.gui.theme import APP_STYLESHEET
 
 
@@ -333,6 +333,9 @@ def test_compute_column_widths_handles_narrow_standard_and_ultrawide() -> None:
     )
     required = [200, 220, 100, 100]
 
+    # Readable headers can exceed the surplus cap and must not be reduced.
+    assert compute_column_widths([200, 220, 100, 171], specs, 2400)[3] == 171
+
     # Narrow: keep exact readable required widths (no crushing) so horizontal scroll works
     assert compute_column_widths(required, specs, 480) == required
 
@@ -415,12 +418,13 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
 
         # Stats table: final Unavailable column is never disproportionately stretched
         assert view.stats_table.horizontalHeader().stretchLastSection() is False
-        unavail_w = view.stats_table.columnWidth(7)
-        metric_w = view.stats_table.columnWidth(0)
-        method_w = view.stats_table.columnWidth(1)
-        assert unavail_w <= 155
-        assert metric_w > unavail_w
-        assert method_w > unavail_w
+        specs = view._stats_table_controller.specs
+        required = measure_required_column_widths(view.stats_table, specs)
+        widths = [view.stats_table.columnWidth(i) for i in range(len(specs))]
+        assert all(actual >= needed for actual, needed in zip(widths, required))
+        assert widths[7] <= max(required[7], specs[7].max_width)
+        assert widths[7] - required[7] <= widths[0] - required[0]
+        assert widths[7] - required[7] <= widths[1] - required[1]
         # Tooltips preserve full values
         assert view.stats_table.item(0, 0).toolTip()
         assert view.stats_table.item(0, 3).toolTip()
