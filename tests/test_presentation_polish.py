@@ -63,6 +63,23 @@ def _settle() -> None:
         app.processEvents()
 
 
+def _assert_observation_geometry(view) -> None:
+    page = view.widget()
+    for card in view._observation_widgets:
+        for label in card.findChildren(QLabel):
+            if not label.isVisibleTo(page) or not label.wordWrap():
+                continue
+            assert label.hasHeightForWidth(), label.text()
+            required = QLabel.heightForWidth(label, label.width())
+            assert label.height() >= required - 1, (label.text(), label.geometry(), required)
+            # A correctly sized label can still be clipped by a smaller ancestor.
+            child = label
+            while child is not page:
+                parent = child.parentWidget()
+                assert parent.contentsRect().contains(child.geometry()), label.text()
+                child = parent
+
+
 def _wait_until(predicate, *, timeout: float = 3.0) -> bool:
     app = _app()
     deadline = time.monotonic() + timeout
@@ -390,6 +407,7 @@ def test_analysis_summary_cards_do_not_stretch_with_tall_sidebar_and_sidebar_exp
             assert lbl.height() >= hfw - 1, f"Clipped summary label at {width}x{height}: {lbl.text()!r}"
 
         # No wrapped QLabel inside observation cards is vertically clipped
+        _assert_observation_geometry(view)
         for obs_w in view._observation_widgets:
             for lbl in (obs_w.title_label, obs_w.summary_label, obs_w.meta_label, *obs_w._wrapped_labels):
                 hfw = lbl.heightForWidth(lbl.width())
@@ -721,6 +739,21 @@ def test_analysis_observation_sidebar_resizes_cleanly_for_larger_fonts_narrow_wi
             for lbl in (*obs_w._wrapped_labels, *obs_w._detail_labels):
                 hfw = lbl.heightForWidth(lbl.width())
                 assert lbl.height() >= hfw - 1, f"Clipped expanded label (12pt): {lbl.text()!r}"
+
+        for width in (1000, 1920, 1280):
+            window.resize(width, 720)
+            _settle()
+            _assert_observation_geometry(view)
+
+        # Exercise a column offering more width than an observation receives.
+        card = expandable[0]
+        original_maximum = card.maximumWidth()
+        card.setMaximumWidth(card.width() - 60)
+        _settle()
+        _assert_observation_geometry(view)
+        card.setMaximumWidth(original_maximum)
+        _settle()
+        _assert_observation_geometry(view)
 
         for obs_w in expandable:
             obs_w.toggle_button.click()

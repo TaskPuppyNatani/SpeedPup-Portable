@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -129,50 +130,17 @@ QTableWidget#analysisStatsTable QHeaderView::section {{
 
 
 class _WrappedLabel(QLabel):
-    """Word-wrapped QLabel that re-invalidates geometry when width or font changes.
+    """Measure text within the width the containing card actually grants."""
 
-    Enforces its synced height floor via ``minimumSizeHint()`` rather than
-    ``setMinimumHeight()`` so ``QLabel.heightForWidth()`` always returns the
-    unconstrained wrapped height when the container widens or narrows.
-    """
-
-    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
-        self._synced_min_height = 0
-        super().__init__(text, parent)
-        self.setWordWrap(True)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-
-    def set_synced_min_height(self, height: int) -> bool:
-        target = max(0, int(height))
-        if self._synced_min_height == target:
-            return False
-        self._synced_min_height = target
-        self.updateGeometry()
-        return True
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        hint = super().minimumSizeHint()
-        if self._synced_min_height > 0:
-            return QSize(hint.width(), max(hint.height(), self._synced_min_height))
-        return hint
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        # A parent layout can query the full column width even when the card
+        # receives less. Keep the native text, style and margin calculation.
+        return super().heightForWidth(min(width, self.width()))
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         if event.size().width() != event.oldSize().width():
             self.updateGeometry()
-
-    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().changeEvent(event)
-        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
-            self._synced_min_height = 0
-            self.updateGeometry()
-            parent = self.parentWidget()
-            while parent is not None:
-                if isinstance(parent, _ObservationDisclosureWidget):
-                    if parent.sync_heights():
-                        parent._notify_ancestors_layout_changed()
-                    break
-                parent = parent.parentWidget()
 
 
 def _label(
@@ -183,7 +151,8 @@ def _label(
     color: str | None = None,
     word_wrap: bool = False,
 ) -> QLabel:
-    widget: QLabel = _WrappedLabel(text) if word_wrap else QLabel(text)
+    widget = _WrappedLabel(text) if word_wrap else QLabel(text)
+    widget.setWordWrap(word_wrap)
     parts: list[str] = []
     if size is not None:
         parts.append(f"font-size: {size}pt;")
@@ -282,7 +251,6 @@ class _ObservationDisclosureWidget(QFrame):
         self.card_data = card
         self._wrapped_labels: list[QLabel] = []
         self._detail_labels: list[QLabel] = []
-        self._syncing_heights = False
         self.toggle_button: QPushButton | None = None
         self.details_panel: QFrame | None = None
         self.setObjectName("observationCard")
@@ -389,138 +357,11 @@ class _ObservationDisclosureWidget(QFrame):
             self.details_panel.setVisible(False)
             layout.addWidget(self.details_panel)
 
-    def _inner_text_width(self, card_width: int) -> int:
-        self.ensurePolished()
-        cm = self.contentsMargins()
-        lay = self.layout()
-        lm = lay.contentsMargins() if lay is not None else cm
-        return max(80, card_width - cm.left() - cm.right() - lm.left() - lm.right())
-
-    def _panel_text_width(self, inner_width: int) -> int:
-        if self.details_panel is None:
-            return inner_width
-        self.details_panel.ensurePolished()
-        pcm = self.details_panel.contentsMargins()
-        play = self.details_panel.layout()
-        plm = play.contentsMargins() if play is not None else pcm
-        return max(80, inner_width - pcm.left() - pcm.right() - plm.left() - plm.right())
-
-    def sync_heights(self, card_width: int | None = None) -> bool:
-        """Align wrapped label minimum heights to live heightForWidth without clipping."""
-        if self._syncing_heights or self.layout() is None:
-            return False
-        w = self.width() if card_width is None else card_width
-        if w <= 0:
-            return False
-        self._syncing_heights = True
-        changed = False
-        try:
-            inner_w = self._inner_text_width(w)
-            for lbl in self._wrapped_labels:
-                lbl.ensurePolished()
-                req = lbl.heightForWidth(inner_w)
-                if req > 0 and isinstance(lbl, _WrappedLabel) and lbl.set_synced_min_height(req):
-                    changed = True
-            if self.details_panel is not None:
-                if not self.details_panel.isHidden():
-                    panel_w = self._panel_text_width(inner_w)
-                    for lbl in self._detail_labels:
-                        lbl.ensurePolished()
-                        req = lbl.heightForWidth(panel_w)
-                        if req > 0 and isinstance(lbl, _WrappedLabel) and lbl.set_synced_min_height(req):
-                            changed = True
-                else:
-                    for lbl in self._detail_labels:
-                        if isinstance(lbl, _WrappedLabel) and lbl.set_synced_min_height(0):
-                            changed = True
-            if changed:
-                if self.details_panel is not None and self.details_panel.layout() is not None:
-                    self.details_panel.layout().invalidate()
-                    self.details_panel.updateGeometry()
-                if self.layout() is not None:
-                    self.layout().invalidate()
-                self.updateGeometry()
-            return changed
-        finally:
-            self._syncing_heights = False
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
-        inner_w = self._inner_text_width(width)
-        cm = self.contentsMargins()
-        lay = self.layout()
-        lm = lay.contentsMargins() if lay is not None else cm
-        spacing = lay.spacing() if lay is not None and lay.spacing() >= 0 else 4
-        total = cm.top() + cm.bottom() + lm.top() + lm.bottom()
-        visible_items = 0
-        for lbl in self._wrapped_labels:
-            if not lbl.isHidden():
-                lbl.ensurePolished()
-                hfw = lbl.heightForWidth(inner_w)
-                total += hfw if hfw > 0 else lbl.sizeHint().height()
-                visible_items += 1
-        if self.toggle_button is not None and not self.toggle_button.isHidden():
-            total += max(self.toggle_button.sizeHint().height(), self.toggle_button.minimumSizeHint().height())
-            visible_items += 1
-        if self.details_panel is not None and not self.details_panel.isHidden():
-            panel_w = self._panel_text_width(inner_w)
-            pcm = self.details_panel.contentsMargins()
-            play = self.details_panel.layout()
-            plm = play.contentsMargins() if play is not None else pcm
-            pspacing = play.spacing() if play is not None and play.spacing() >= 0 else 6
-            panel_h = pcm.top() + pcm.bottom() + plm.top() + plm.bottom()
-            panel_items = 0
-            for idx, lbl in enumerate(self._detail_labels):
-                if idx > 0:
-                    panel_h += 2
-                    panel_items += 1
-                lbl.ensurePolished()
-                hfw = lbl.heightForWidth(panel_w)
-                panel_h += hfw if hfw > 0 else lbl.sizeHint().height()
-                panel_items += 1
-            if panel_items > 1:
-                panel_h += pspacing * (panel_items - 1)
-            total += panel_h
-            visible_items += 1
-        if visible_items > 1:
-            total += spacing * (visible_items - 1)
-        return total
-
-    def _notify_ancestors_layout_changed(self) -> None:
-        self.updateGeometry()
-        parent = self.parentWidget()
-        while parent is not None:
-            if parent.layout() is not None:
-                parent.layout().invalidate()
-                parent.layout().activate()
-            parent.updateGeometry()
-            if isinstance(parent, QScrollArea):
-                sync_fn = getattr(parent, "_sync_sidebar_layout", None)
-                if callable(sync_fn):
-                    sync_fn()
-                break
-            parent = parent.parentWidget()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().resizeEvent(event)
-        if self.sync_heights(event.size().width()):
-            self._notify_ancestors_layout_changed()
-
-    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().changeEvent(event)
-        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
-            if self.sync_heights():
-                self._notify_ancestors_layout_changed()
-
     def _on_toggled(self, checked: bool) -> None:
         if self.details_panel is not None:
             self.details_panel.setVisible(checked)
         if self.toggle_button is not None:
             self.toggle_button.setText(self._expanded_text if checked else self._collapsed_text)
-        self.sync_heights()
-        self._notify_ancestors_layout_changed()
 
 
 class _SummaryCardsGrid(QWidget):
@@ -646,10 +487,10 @@ class AnalysisView(QScrollArea):
         self._last_result: AnalysisResult | None = None
         self._last_intelligence_presentation: IntelligencePresentation | None = None
         self._observation_widgets: list[_ObservationDisclosureWidget] = []
-        self._syncing_sidebar = False
 
         page = QWidget()
         outer = QHBoxLayout(page)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         outer.setContentsMargins(17, 16, 17, 17)
         outer.setSpacing(14)
 
@@ -671,9 +512,6 @@ class AnalysisView(QScrollArea):
         outer.addWidget(main_col, 3)
         outer.addWidget(side_col, 1)
         self._page = page
-        self._outer_layout = outer
-        self._main_col = main_col
-        self._side_col = side_col
         self.setWidget(page)
 
     # ------------------------------------------------------------------
@@ -1082,7 +920,6 @@ class AnalysisView(QScrollArea):
         side_layout.addWidget(status_card)
 
         intelligence_card, intelligence_layout = _card('✦  Historical Observations')
-        self._intelligence_card = intelligence_card
         self._intelligence_container = QVBoxLayout()
         self._intelligence_container.setSpacing(9)
         intelligence_layout.addLayout(self._intelligence_container)
@@ -1090,7 +927,6 @@ class AnalysisView(QScrollArea):
 
         # Coverage and descriptive notes remain separate from observations.
         notes_card, notes_layout = _card("≡  Coverage & Descriptive Notes")
-        self._notes_card = notes_card
         self._notes_container = QVBoxLayout()
         self._notes_container.setSpacing(7)
         notes_layout.addLayout(self._notes_container)
@@ -1649,128 +1485,6 @@ class AnalysisView(QScrollArea):
         self.side_status_detail.setText(detail_txt)
         self._render_notes(result.coverage_notes)
 
-    def _effective_sidebar_width(self) -> int:
-        side_w = self._side_col.width()
-        if side_w > 0:
-            return side_w
-        vp_w = self.viewport().width()
-        if vp_w > 0:
-            om = self._outer_layout.contentsMargins()
-            avail = max(0, vp_w - om.left() - om.right() - self._outer_layout.spacing())
-            return max(
-                self._side_col.minimumWidth(),
-                min(self._side_col.maximumWidth(), avail // 4),
-            )
-        return self._side_col.minimumWidth()
-
-    def _sync_sidebar_wrapped_labels(self, side_w: int) -> bool:
-        changed = False
-        self._intelligence_card.ensurePolished()
-        self._notes_card.ensurePolished()
-
-        icm = self._intelligence_card.contentsMargins()
-        ilay = self._intelligence_card.layout()
-        ilm = ilay.contentsMargins() if ilay is not None else icm
-        intel_inner_w = max(120, side_w - icm.left() - icm.right() - ilm.left() - ilm.right())
-
-        for obs_w in self._observation_widgets:
-            if obs_w.sync_heights(intel_inner_w):
-                changed = True
-
-        # Sync standalone wrapped labels in intelligence sub-cards and notes.
-        for card_frame in (self._intelligence_card, self._notes_card):
-            cm = card_frame.contentsMargins()
-            clay = card_frame.layout()
-            lm = clay.contentsMargins() if clay is not None else cm
-            base_w = max(120, side_w - cm.left() - cm.right() - lm.left() - lm.right())
-            for lbl in card_frame.findChildren(_WrappedLabel):
-                parent = lbl.parentWidget()
-                if isinstance(parent, _ObservationDisclosureWidget) or (
-                    parent is not None
-                    and isinstance(parent.parentWidget(), _ObservationDisclosureWidget)
-                ):
-                    continue
-                if lbl.isHidden():
-                    continue
-                lbl.ensurePolished()
-                target_w = base_w
-                if parent is not None and parent is not card_frame:
-                    parent.ensurePolished()
-                    pcm = parent.contentsMargins()
-                    play = parent.layout()
-                    plm = play.contentsMargins() if play is not None else pcm
-                    target_w = max(
-                        80,
-                        base_w - pcm.left() - pcm.right() - plm.left() - plm.right(),
-                    )
-                req = lbl.heightForWidth(target_w)
-                if req > 0 and lbl.set_synced_min_height(req):
-                    changed = True
-        return changed
-
-    def _sync_sidebar_layout(self) -> None:
-        """Synchronize wrapped sidebar labels and scroll-container height to live widths."""
-        if not hasattr(self, "_page") or self._syncing_sidebar:
-            return
-        self._syncing_sidebar = True
-        try:
-            for _ in range(3):
-                vp = self.viewport().size()
-                if vp.width() > 0:
-                    target_page_w = max(vp.width(), self._page.minimumSizeHint().width())
-                    if self._page.width() != target_page_w:
-                        self._page.resize(target_page_w, max(self._page.height(), vp.height()))
-                        self._outer_layout.activate()
-
-                side_w = self._effective_sidebar_width()
-                changed = self._sync_sidebar_wrapped_labels(side_w)
-
-                for lay in (
-                    self._intelligence_container,
-                    self._notes_container,
-                    self._intelligence_card.layout(),
-                    self._notes_card.layout(),
-                    self._side_col.layout(),
-                    self._outer_layout,
-                ):
-                    if lay is not None:
-                        lay.invalidate()
-                        lay.activate()
-                self._intelligence_card.updateGeometry()
-                self._notes_card.updateGeometry()
-                self._side_col.updateGeometry()
-                self._page.updateGeometry()
-
-                resized = False
-                vp = self.viewport().size()
-                if vp.width() > 0:
-                    page_w = max(vp.width(), self._page.minimumSizeHint().width())
-                    needed_h = max(
-                        vp.height(),
-                        self._page.minimumSizeHint().height(),
-                        self._page.heightForWidth(page_w) if self._page.hasHeightForWidth() else 0,
-                    )
-                    if self._page.width() != page_w or self._page.height() != needed_h:
-                        self._page.resize(page_w, needed_h)
-                        self._outer_layout.activate()
-                        resized = True
-
-                # If resizing toggled a scrollbar and narrowed/widened the sidebar,
-                # run another pass so heights settle cleanly.
-                if not resized and not changed and self._effective_sidebar_width() == side_w:
-                    break
-        finally:
-            self._syncing_sidebar = False
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().resizeEvent(event)
-        self._sync_sidebar_layout()
-
-    def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        super().changeEvent(event)
-        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
-            self._sync_sidebar_layout()
-
     def _render_notes(self, notes: Sequence[str]) -> None:
         _clear_layout(self._notes_container)
         if not notes:
@@ -1782,11 +1496,9 @@ class AnalysisView(QScrollArea):
                     word_wrap=True,
                 )
             )
-            self._sync_sidebar_layout()
             return
         for text in notes:
             self._notes_container.addWidget(_label(f"•  {text}", size=8, color=TEXT, word_wrap=True))
-        self._sync_sidebar_layout()
 
     def _render_intelligence(self, intelligence, *, message=None) -> None:
         _clear_layout(self._intelligence_container)
@@ -1801,7 +1513,6 @@ class AnalysisView(QScrollArea):
                     word_wrap=True,
                 )
             )
-            self._sync_sidebar_layout()
             return
 
         presentation = build_intelligence_presentation(intelligence)
@@ -1905,7 +1616,6 @@ class AnalysisView(QScrollArea):
                     )
                 )
             self._intelligence_container.addWidget(qual_box)
-        self._sync_sidebar_layout()
 
     def _update_state_banner(self, result: AnalysisResult) -> None:
         if result.total_stored_records == 0:
